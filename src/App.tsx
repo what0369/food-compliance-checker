@@ -34,7 +34,43 @@ const clean = (value: unknown) => String(value ?? "").trim();
 const compact = (value: string) => value.toLowerCase().replace(/[\s　\p{P}\p{S}]/gu, "");
 const companyCore = (value: string) => compact(value).replace(/股份有限公司|有限公司|企業社|商行|公司$/g, "");
 const nonEmpty = (value: string) => value.length > 0;
-function findValue(row: Record<string, unknown>, names: string[]) { const key = Object.keys(row).find((item) => names.some((name) => item.replace(/\s/g, "").includes(name))); return key ? clean(row[key]) : ""; }
+const normalizedHeader = (value: string) => value.replace(/[\s　]/g, "").replace(/[／/]/g, "／");
+function findValue(row: Record<string, unknown>, names: string[]) {
+  const keys = Object.keys(row);
+  for (const name of names) {
+    const target = normalizedHeader(name);
+    const key = keys.find((item) => normalizedHeader(item).includes(target));
+    if (key && clean(row[key])) return clean(row[key]);
+  }
+  return "";
+}
+function parseWorkbookRows(workbook: XLSX.WorkBook) {
+  const productHeaders = ["品項名稱", "產品名稱", "子產品名稱", "商品名稱", "品名"];
+  const partyHeaders = ["品牌完整名稱", "供應商名稱", "公司登記名稱", "商戶名稱", "商家名稱", "業者名稱"];
+  const parsed: UploadRow[] = [];
+  const matchedSheets: string[] = [];
+  for (const sheetName of workbook.SheetNames) {
+    const sheet = workbook.Sheets[sheetName];
+    const preview = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, defval: "", range: 0 }).slice(0, 20);
+    const headerIndex = preview.findIndex((cells) => {
+      const headers = cells.map((cell) => normalizedHeader(clean(cell)));
+      return productHeaders.some((name) => headers.some((header) => header.includes(normalizedHeader(name)))) && partyHeaders.some((name) => headers.some((header) => header.includes(normalizedHeader(name))));
+    });
+    if (headerIndex < 0) continue;
+    const raw = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: "", range: headerIndex });
+    const rows = raw.map((row) => ({
+      product: findValue(row, ["品項名稱", "產品名稱", "子產品名稱", "商品名稱", "品名", "產品", "商品"]),
+      supplier: findValue(row, ["商戶名稱(提案公司二)", "公司登記名稱", "供應商名稱", "供應商", "業者名稱", "公司名稱", "業者"]),
+      brand: findValue(row, ["品牌完整名稱", "商家名稱", "品牌名稱", "品牌"]),
+      manufacturer: findValue(row, ["製造商／進口商名稱", "製造商/進口商名稱", "製造商", "進口商"]),
+      taxId: findValue(row, ["統一編號", "統編"]),
+      adUrl: findValue(row, ["商品／廣告網址", "商品/廣告網址", "廣告網址", "商品網址", "網址"]),
+      claimText: findValue(row, ["購物頁宣稱文字", "廣告宣稱文字", "宣稱文字", "廣告文字"]),
+    })).filter((row) => row.product || row.supplier || row.brand || row.manufacturer);
+    if (rows.length) { parsed.push(...rows); matchedSheets.push(sheetName); }
+  }
+  return { parsed, matchedSheets };
+}
 function makeQuery(row: UploadRow) { return [...new Set([row.keyword, row.brand, row.product, row.supplier, row.manufacturer].filter(Boolean))].slice(0, 3).join(" "); }
 function newsKey(row: UploadRow) { return row.keyword || row.supplier || row.manufacturer || row.brand || row.product; }
 function newsMatches(row: UploadRow, items: NewsItem[]) {
@@ -114,11 +150,9 @@ export default function Home() {
     try {
       if (file.size > 10 * 1024 * 1024) throw new Error("檔案超過 10 MB 上限。");
       const workbook = XLSX.read(await file.arrayBuffer(), { type: "array", cellDates: true });
-      const targetName = workbook.SheetNames.find((name) => name.includes("網站查核匯入")) || workbook.SheetNames[0];
-      const raw = XLSX.utils.sheet_to_json<Record<string, unknown>>(workbook.Sheets[targetName], { defval: "" });
-      const parsed = raw.map((row) => ({ product: findValue(row, ["產品名稱", "子產品名稱", "產品", "品名", "商品"]), supplier: findValue(row, ["供應商名稱", "供應商", "業者名稱", "公司名稱", "業者"]), brand: findValue(row, ["品牌完整名稱", "品牌名稱", "品牌"]), manufacturer: findValue(row, ["製造商／進口商名稱", "製造商/進口商名稱", "製造商", "進口商"]), taxId: findValue(row, ["統一編號", "統編"]), adUrl: findValue(row, ["商品／廣告網址", "商品/廣告網址", "廣告網址", "商品網址", "網址"]), claimText: findValue(row, ["購物頁宣稱文字", "廣告宣稱文字", "宣稱文字", "廣告文字"]) })).filter((row) => row.product || row.supplier || row.brand || row.manufacturer);
-      if (!parsed.length) throw new Error("找不到產品、品牌、供應商或製造商欄位。");
-      setRows(parsed); setResults([]); setFileName(file.name); setProgress("");
+      const { parsed, matchedSheets } = parseWorkbookRows(workbook);
+      if (!parsed.length) throw new Error("無法自動辨識資料表。請確認表內有品項／產品名稱，以及品牌、商戶或供應商名稱。");
+      setRows(parsed); setResults([]); setFileName(file.name); setProgress(`已自動辨識 ${matchedSheets.length} 張資料表（${matchedSheets.join("、")}），共 ${parsed.length.toLocaleString()} 筆。`);
       const saved = localStorage.getItem(STORAGE_KEY);
       if (saved) {
         const data = JSON.parse(saved) as { fileName: string; rowCount: number; results: Result[] };
@@ -259,15 +293,15 @@ export default function Home() {
 <small>系統會自動判別並同時比對產品與業者名稱</small>
 </div>
 <div className="or-divider">
-<span>或批次上傳 Excel</span>
+<span>或直接上傳你原本的 Excel</span>
 </div>
 <button className={`dropzone ${fileName && !rows[0]?.keyword ? "has-file" : ""}`} onClick={() => inputRef.current?.click()} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); const file = e.dataTransfer.files[0]; if (file) readFile(file); }}>
 <input ref={inputRef} type="file" accept=".xlsx,.xls,.csv" hidden onChange={(e) => e.target.files?.[0] && readFile(e.target.files[0])}/>
 <span className="file-icon">{fileName && !rows[0]?.keyword ? "✓" : "XL"}</span>
 <strong>{fileName && !rows[0]?.keyword ? fileName : "拖曳 Excel 到這裡，或點擊選擇"}</strong>
-<small>{fileName && !rows[0]?.keyword ? `已讀取 ${rows.length} 筆有效資料` : "產品、品牌或業者至少一項｜統編選填"}</small>
+<small>{fileName && !rows[0]?.keyword ? `已讀取 ${rows.length} 筆有效資料` : "自動找表頭、合併多張工作表｜不必套用特殊範本"}</small>
 </button>{error && <p className="error">{error}</p>}{sourceWarning && <p className="warning-box">{sourceWarning}</p>}<div className="upload-actions">
-<button className="text-btn" onClick={downloadTemplate}>↓ 下載新版範本</button>
+<button className="text-btn" onClick={downloadTemplate}>↓ 需要時下載簡易範本</button>
 <button className="text-btn" onClick={useSample}>使用範例資料</button>
 </div>
 <button className="primary" disabled={!rows.length || loading || Boolean(rows[0]?.keyword)} onClick={runCheck}>{loading ? <>

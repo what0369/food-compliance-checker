@@ -1,4 +1,5 @@
 import { readFile, writeFile } from "node:fs/promises";
+import { updateLocalOfficial } from "./update-local-data.mjs";
 
 const ADS_URL = "https://data.fda.gov.tw/data/opendata/22/json";
 const IMPORTS_URL = "https://data.fda.gov.tw/data/opendata/52/json";
@@ -83,5 +84,5 @@ async function updateNews(now, since) {
 }
 
 const now = new Date(); const since = new Date(now); since.setFullYear(since.getFullYear() - 1);
-await Promise.all([updateOfficial(now, since), updateNews(now, since)]);
-console.log(`完成：官方與新聞資料更新至 ${now.toISOString()}`);
+await Promise.all([updateOfficial(now, since), updateNews(now, since), updateLocalOfficial(now)]);
+console.log(`完成：中央官方、地方衛生局與新聞資料更新至 ${now.toISOString()}`);

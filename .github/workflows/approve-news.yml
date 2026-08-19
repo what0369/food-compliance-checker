@@ -1,0 +1,42 @@
+name: 核准人工新聞線索
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  approve:
+    if: >-
+      github.event.issue.pull_request == null &&
+      github.event.comment.body == '/收錄' &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: 寫入人工核准新聞庫
+        run: node scripts/approve-news.mjs
+        env:
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_URL: ${{ github.event.issue.html_url }}
+      - name: 提交新聞資料
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add public/data/manual-news.json
+          if git diff --cached --quiet; then
+            echo "新聞已存在，無須提交"
+          else
+            git commit -m "收錄人工核准新聞 #${{ github.event.issue.number }}"
+            git push
+          fi
+      - name: 回覆並關閉議題
+        run: gh issue close "${{ github.event.issue.number }}" --comment "已核准並納入共用新聞資料庫；網站將自動重新發布。"
+        env:
+          GH_TOKEN: ${{ github.token }}

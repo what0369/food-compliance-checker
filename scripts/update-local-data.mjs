@@ -1,14 +1,13 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { collectHealthBureauNews } from "./update-health-news.mjs";
+import { collectLocalAnnouncements } from "./update-local-announcements.mjs";
 
 const OUTPUT = new URL("../public/data/local-official.json", import.meta.url);
 const DATASETS = {
   taipei: "https://data.gov.tw/dataset/132330",
-  newTaipei: "https://data.ntpc.gov.tw/datasets/078cb722-15ac-4e1e-b541-e75bfe0aa440",
   taoyuan: "https://data.gov.tw/dataset/168689",
   taichung: "https://data.gov.tw/dataset/176956",
   tainan: "https://data.gov.tw/dataset/177649",
-  kaohsiung: "https://health.kcg.gov.tw/Content_List.aspx?Create=1&n=9DF844BC2089D2FD",
 };
 
 const text = (value) => String(value ?? "").trim();
@@ -127,11 +126,9 @@ export async function updateLocalOfficial(now = new Date()) {
   const previous = JSON.parse(await readFile(OUTPUT, "utf8").catch(() => '{"records":[]}'));
   const jobs = [
     { city: "臺北市", datasetUrl: DATASETS.taipei, mode: "結構化開放資料", run: () => csvDataset("臺北市", DATASETS.taipei, since, now) },
-    { city: "新北市", datasetUrl: DATASETS.newTaipei, mode: "官方檔案索引", run: null },
     { city: "桃園市", datasetUrl: DATASETS.taoyuan, mode: "結構化開放資料", run: () => csvDataset("桃園市", DATASETS.taoyuan, since, now) },
     { city: "臺中市", datasetUrl: DATASETS.taichung, mode: "結構化開放資料", run: () => taichung(since, now) },
     { city: "臺南市", datasetUrl: DATASETS.tainan, mode: "結構化開放資料", run: () => tainan(since, now) },
-    { city: "高雄市", datasetUrl: DATASETS.kaohsiung, mode: "官方公告索引", run: null },
   ];
   const runWithLimit = (job) => Promise.race([
     job.run(),
@@ -152,6 +149,8 @@ export async function updateLocalOfficial(now = new Date()) {
   const healthNews = await collectHealthBureauNews(now, since, previous.records || []);
   records.push(...healthNews.records);
   sources.push(healthNews.source);
+  const localAnnouncements = await collectLocalAnnouncements(now, since, previous.records || []);
+  for (const result of localAnnouncements) { records.push(...result.records); sources.push(result.source); }
   const unique = [...new Map(records.map((item) => [`${compact(item.city)}|${compact(item.product)}|${compact(item.company)}|${item.date}|${compact(item.reason)}`, item])).values()]
     .sort((a, b) => b.date.localeCompare(a.date));
   await writeFile(OUTPUT, JSON.stringify({ updatedAt: now.toISOString(), periodStart: since.toISOString().slice(0, 10), periodEnd: now.toISOString().slice(0, 10), records: unique, sources }));

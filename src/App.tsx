@@ -27,6 +27,8 @@ const HEALTH_NEWS_URL = "https://www.fda.gov.tw/tc/csmnews.aspx";
 const NEW_ISSUE_URL = "https://github.com/what0369/food-compliance-checker/issues/new";
 const ISSUES_URL = "https://github.com/what0369/food-compliance-checker/issues";
 const STORAGE_KEY = "food-compliance-free-check-v6";
+const VERSION_LABEL = `v${__APP_VERSION__}`;
+const BUILD_LABEL = __BUILD_ID__ === "local" ? "本機預覽" : __BUILD_ID__;
 const SAMPLE_ROWS: UploadRow[] = [
   { product: "Slimmit食事對抗酵素", contents: "", supplier: "健康生活商行", brand: "Slimmit", manufacturer: "", taxId: "", adUrl: "", claimText: "六個月降低體重，促進代謝並降低膽固醇。" },
   { product: "原味燕麥片", contents: "燕麥", supplier: "日常食品股份有限公司", brand: "日日好食", manufacturer: "", taxId: "", adUrl: "", claimText: "" },
@@ -244,7 +246,7 @@ export default function Home() {
       });
       setResults(checked);
       localStorage.setItem(STORAGE_KEY, JSON.stringify({ fileName: sourceName, rowCount: targetRows.length, results: checked, checkedAt: new Date().toISOString() }));
-      if (!official.adsAvailable || !official.importsAvailable || !newsPayload.available || !localResponse.ok || local.sources.some((item) => item.status === "本次更新失敗")) setSourceWarning("部分資料來源本次未成功更新；結果不可視為完整查核，請查看資料來源狀態或使用人工搜尋入口補查。");
+      if (!official.adsAvailable || !official.importsAvailable || !newsPayload.available || !localResponse.ok || local.sources.some((item) => item.status.includes("失敗"))) setSourceWarning("部分資料來源本次未成功更新；結果不可視為完整查核，請查看資料來源狀態或使用人工搜尋入口補查。");
       setProgress(`完成：${checked.length} 筆結果已保存在此瀏覽器。`);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "自動查核失敗，請稍後再試。"); }
     finally { setLoading(false); }
@@ -308,7 +310,7 @@ export default function Home() {
       const local = await localResponse.json() as { records: OfficialItem[]; sources: LocalSource[]; updatedAt: string };
       const manual = await manualResponse.json() as { items: ManualNewsItem[]; updatedAt: string };
       const daily = await dailyResponse.json() as { items: NewsItem[]; updatedAt: string };
-      setDatabaseData({ official: [...official.ads, ...official.imports], local: local.records, localSources: local.sources, manual: manual.items, daily: daily.items, officialUpdatedAt: official.updatedAt, localUpdatedAt: local.updatedAt, manualUpdatedAt: manual.updatedAt, dailyUpdatedAt: daily.updatedAt });
+      setDatabaseData({ official: [...official.ads, ...official.imports], local: local.records.filter((item) => item.matchable !== false), localSources: local.sources, manual: manual.items, daily: daily.items, officialUpdatedAt: official.updatedAt, localUpdatedAt: local.updatedAt, manualUpdatedAt: manual.updatedAt, dailyUpdatedAt: daily.updatedAt });
     } catch (cause) { setDatabaseError(cause instanceof Error ? cause.message : "資料庫讀取失敗。"); }
     finally { setDatabaseLoading(false); }
   }
@@ -321,7 +323,7 @@ export default function Home() {
 <span>查</span>
 <div>
 <b>食安違規查核台</b>
-<small>FREE COMPLIANCE CHECK</small>
+<small>FREE COMPLIANCE CHECK <span>{VERSION_LABEL}</span></small>
 </div>
 </a>
 <div className="top-actions">
@@ -661,7 +663,8 @@ export default function Home() {
 <h3>六都衛生局第二層資料</h3>
 <dl>
 <div><dt>涵蓋單位</dt><dd>臺北、新北、桃園、臺中、臺南及高雄市政府衛生局</dd></div>
-<div><dt>自動比對</dt><dd>只納入具有產品、業者、日期及不符合內容的結構化紀錄；PDF 或公告索引僅提供人工開啟，不直接判定命中</dd></div>
+<div><dt>自動比對</dt><dd>臺北、桃園、臺中、臺南讀取結構化資料；新北與高雄另逐篇解析公告正文及 PDF，只納入含不合格、不符、超標、下架或回收證據的內容</dd></div>
+<div><dt>解析失敗</dt><dd>無法取得正文或 PDF 時會排除自動命中，保留失敗狀態並於下次每日更新重試</dd></div>
 <div><dt>更新方式</dt><dd>每天逐一連線；單一城市失敗會顯示狀態，不影響其他來源</dd></div>
 </dl>
 <a href={LOCAL_HEALTH_URL} target="_blank" rel="noreferrer">查看全國地方衛生機關 ↗</a>
@@ -797,6 +800,7 @@ export default function Home() {
     <footer>
 <span>食安違規查核台 · 免費採購風險初篩工具</span>
 <span>查核期間：{dateLabel}</span>
+<span className="version-label">版本 {VERSION_LABEL} · {BUILD_LABEL}</span>
 </footer>
   </main>;
 }

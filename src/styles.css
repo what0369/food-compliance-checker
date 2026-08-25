@@ -224,6 +224,15 @@ footer { min-height:65px; padding:0 clamp(22px,5vw,72px); display:flex; align-it
 .local-source-status span { color:var(--muted); font-size:9px; }
 .local-source-status small { color:#a15c00; font-size:8px; }
 .local-source-status small.ok { color:var(--green); }
+.local-count-panel { margin:14px 0 0; padding:14px; display:grid; grid-template-columns:repeat(3,1fr); gap:8px; background:#f1ebf7; border:1px solid #ddd0e9; border-radius:12px; }
+.local-count-panel>div { padding:12px; display:grid; grid-template-columns:1fr auto; gap:4px 10px; background:#fff; border:1px solid var(--line); border-radius:9px; }
+.local-count-panel span { align-self:center; color:var(--ink); font-size:10px; font-weight:900; }
+.local-count-panel strong { grid-row:1/span 2; grid-column:2; color:var(--green); font-size:24px; }
+.local-count-panel small { color:var(--muted); font-size:8px; }
+.local-count-panel>p { grid-column:1/-1; margin:2px 2px 0; color:var(--muted); font-size:9px; line-height:1.6; }
+.local-correction-note { margin:12px 0; padding:12px 14px; display:flex; align-items:flex-start; gap:10px; color:#4b356d; background:#fbf8fe; border:1px dashed #bda6d4; border-radius:10px; font-size:9px; line-height:1.6; }
+.local-correction-note b { white-space:nowrap; font-size:10px; }
+.database-table td a.correction-link { color:#7a4aaa; font-weight:900; }
 .database-toolbar { margin:16px 0 10px; padding:13px; display:grid; grid-template-columns:auto minmax(200px,1fr) auto; align-items:center; gap:10px; background:#f1ebf7; border:1px solid #ddd0e9; border-radius:11px; }
 .database-toolbar label { color:var(--green-dark); font-size:10px; font-weight:900; }
 .database-toolbar input { min-width:0; height:40px; padding:0 11px; color:var(--ink); background:#fff; border:1px solid #c4b3d6; border-radius:8px; font-size:11px; }
@@ -275,7 +284,9 @@ footer { min-height:65px; padding:0 clamp(22px,5vw,72px); display:flex; align-it
 @media (max-width:600px) { .section-actions { width:100%; justify-content:flex-start; }
 .news-form>div { grid-template-columns:1fr; }
 .result-legend { grid-template-columns:1fr; } }
-@media (max-width:700px) { .database-summary,.local-source-status { grid-template-columns:1fr; }
+@media (max-width:700px) { .database-summary,.local-source-status,.local-count-panel { grid-template-columns:1fr; }
+.local-count-panel>p { grid-column:1; }
+.local-correction-note { flex-direction:column; gap:3px; }
 .database-summary button { min-height:82px; }
 .database-toolbar { grid-template-columns:1fr; }
 .database-page>header { align-items:flex-start; }

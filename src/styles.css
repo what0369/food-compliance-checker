@@ -115,11 +115,20 @@ footer { min-height:65px; padding:0 clamp(22px,5vw,72px); display:flex; align-it
 .workflow strong { font-size:11px; }
 .workflow small { color:var(--muted); font-size:9px; }
 .workflow>i { color:#b8a8c7; font-style:normal; }
-.status-產品紀錄命中 { color:var(--red); background:var(--red-soft); }
-.status-供應商紀錄命中 { color:#9a5510; background:#fff3e3; }
-.status-新聞疑似命中 { color:#2d648d; background:#edf5fb; }
+.status-同商品紀錄 { color:var(--red); background:var(--red-soft); }
+.status-相關品類，需加強查證 { color:#9a5510; background:#fff0dc; }
+.status-同品牌／供應商其他商品 { color:#75610a; background:#fff8d8; }
+.status-新聞線索 { color:#2d648d; background:#edf5fb; }
 .status-本次未命中 { color:var(--green); background:#f1eafa; }
 .status-資料不足 { color:#68746f; background:#edf1ef; }
+.result-legend { margin:20px 0 14px; display:grid; grid-template-columns:repeat(4,1fr); gap:8px; }
+.result-legend div { min-height:76px; padding:13px 14px; display:grid; align-content:center; gap:5px; border:1px solid var(--line); border-radius:11px; background:#fff; }
+.result-legend b { font-size:10px; }
+.result-legend small { color:var(--muted); font-size:8px; line-height:1.45; }
+.result-legend .level-product { border-top:4px solid var(--red); }
+.result-legend .level-related { border-top:4px solid #d17a18; }
+.result-legend .level-party { border-top:4px solid #c2a02a; }
+.result-legend .level-clear { border-top:4px solid var(--green); }
 .optional { margin-top:5px; color:#8b9994!important; }
 .search-actions { display:flex; flex-wrap:wrap; gap:6px; }
 .search-actions a { padding:7px 9px; color:var(--green); background:#f3edf8; border:1px solid #ddd0e9; border-radius:7px; font-size:10px; font-weight:900; text-decoration:none; }
@@ -186,6 +195,10 @@ footer { min-height:65px; padding:0 clamp(22px,5vw,72px); display:flex; align-it
 .news-form textarea { min-height:110px; font-size:11px; }
 .modal-error { margin:10px 0 0; }
 .github-note { margin:10px 0 0; color:var(--muted); text-align:center; font-size:9px; line-height:1.5; }
+.github-fallback { margin-top:12px; padding:12px; color:#554761; background:#f5eff9; border:1px solid #d9c9e6; border-radius:10px; }
+.github-fallback p { margin:0 0 9px; font-size:11px; line-height:1.6; }
+.github-fallback div { display:flex; gap:8px; flex-wrap:wrap; }
+.github-fallback button,.github-fallback a { padding:8px 12px; color:#5d3574; background:#fff; border:1px solid #cdb4df; border-radius:8px; font-size:10px; font-weight:700; text-decoration:none; }
 .database-page { position:fixed; z-index:70; inset:0; overflow:auto; color:var(--ink); background:var(--paper); }
 .database-page>header { min-height:122px; padding:25px clamp(20px,5vw,72px); display:flex; align-items:center; justify-content:space-between; gap:20px; color:#fff; background:#4b356d; }
 .database-page>header .eyebrow { margin-bottom:5px; }
@@ -249,7 +262,8 @@ footer { min-height:65px; padding:0 clamp(22px,5vw,72px); display:flex; align-it
 @media (max-width:1100px) { .stats.five { grid-template-columns:repeat(3,1fr); } }
 @media (max-width:900px) { .workflow { width:calc(100% - 36px); display:grid; grid-template-columns:1fr 1fr; }
 .workflow>i { display:none; }
-.stats.five { grid-template-columns:repeat(2,1fr); } }
+.stats.five { grid-template-columns:repeat(2,1fr); }
+.result-legend { grid-template-columns:repeat(2,1fr); } }
 @media (max-width:600px) { .workflow { margin-top:-20px; grid-template-columns:1fr; }
 .law-links { justify-content:flex-start; }
 .review-modal { padding:24px 18px; }
@@ -257,7 +271,8 @@ footer { min-height:65px; padding:0 clamp(22px,5vw,72px); display:flex; align-it
 @media (max-width:430px) { .quick-search>div { grid-template-columns:1fr; }
 .quick-search button { min-height:40px; } }
 @media (max-width:600px) { .section-actions { width:100%; justify-content:flex-start; }
-.news-form>div { grid-template-columns:1fr; } }
+.news-form>div { grid-template-columns:1fr; }
+.result-legend { grid-template-columns:1fr; } }
 @media (max-width:700px) { .database-summary,.local-source-status { grid-template-columns:1fr; }
 .database-summary button { min-height:82px; }
 .database-toolbar { grid-template-columns:1fr; }
@@ -275,3 +290,4 @@ footer { min-height:65px; padding:0 clamp(22px,5vw,72px); display:flex; align-it
 .database-link { max-width:75px; padding:7px 8px; line-height:1.25; }
 .source-process>div { grid-template-columns:1fr; }
 .source-grid dl div { grid-template-columns:1fr; gap:4px; } }
+.news-entities{display:flex;flex-direction:column;gap:4px;margin-top:8px}.news-entities small{display:block;color:#655b72;line-height:1.45}.parse-badge{display:inline-flex;width:max-content;border-radius:999px;padding:3px 9px;font-size:12px;font-weight:800}.parse-badge.parsed{background:#e6f5ee;color:#176f57}.parse-badge.title-only{background:#f2edf7;color:#71647f}

@@ -1,4 +1,5 @@
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
+import { collectHealthBureauNews } from "./update-health-news.mjs";
 
 const OUTPUT = new URL("../public/data/local-official.json", import.meta.url);
 const DATASETS = {
@@ -121,7 +122,9 @@ async function taichung(since, now) {
 }
 
 export async function updateLocalOfficial(now = new Date()) {
-  const since = new Date(now); since.setFullYear(since.getFullYear() - 1);
+  // 年度制：查核本年度與前一完整年度；例如 2026 年為 2025-01-01 至今。
+  const since = new Date(Date.UTC(now.getUTCFullYear() - 1, 0, 1));
+  const previous = JSON.parse(await readFile(OUTPUT, "utf8").catch(() => '{"records":[]}'));
   const jobs = [
     { city: "臺北市", datasetUrl: DATASETS.taipei, mode: "結構化開放資料", run: () => csvDataset("臺北市", DATASETS.taipei, since, now) },
     { city: "新北市", datasetUrl: DATASETS.newTaipei, mode: "官方檔案索引", run: null },
@@ -146,6 +149,9 @@ export async function updateLocalOfficial(now = new Date()) {
     else if (result.error) sources.push({ city: job.city, datasetUrl: job.datasetUrl, mode: job.mode, status: "本次更新失敗", recordCount: 0, message: result.error instanceof Error ? result.error.message : "未知錯誤" });
     else { records.push(...result.items); sources.push({ city: job.city, datasetUrl: job.datasetUrl, mode: job.mode, status: "已連線", recordCount: result.items.length }); }
   }
+  const healthNews = await collectHealthBureauNews(now, since, previous.records || []);
+  records.push(...healthNews.records);
+  sources.push(healthNews.source);
   const unique = [...new Map(records.map((item) => [`${compact(item.city)}|${compact(item.product)}|${compact(item.company)}|${item.date}|${compact(item.reason)}`, item])).values()]
     .sort((a, b) => b.date.localeCompare(a.date));
   await writeFile(OUTPUT, JSON.stringify({ updatedAt: now.toISOString(), periodStart: since.toISOString().slice(0, 10), periodEnd: now.toISOString().slice(0, 10), records: unique, sources }));

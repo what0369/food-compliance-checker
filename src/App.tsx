@@ -77,12 +77,21 @@ function parseWorkbookRows(workbook: XLSX.WorkBook) {
 }
 function makeQuery(row: UploadRow) { return [...new Set([row.keyword, row.brand, row.product, row.supplier, row.manufacturer].filter(Boolean))].slice(0, 3).join(" "); }
 function newsKey(row: UploadRow) { return row.keyword || row.supplier || row.manufacturer || row.brand || row.product; }
+const NEWS_CATEGORY_SUFFIX = /(?:泡菜|食品|美食|料理|烘焙|糕餅|油品|製油|茶葉|農產|伴手禮)$/;
+function newsNameTerms(value: string, minimumLength = 3) {
+  const full = companyCore(value);
+  const withoutCategory = full.replace(NEWS_CATEGORY_SUFFIX, "");
+  return [...new Set([full, withoutCategory])].filter((term) => term.length >= minimumLength);
+}
+function newsSearchable(item: NewsItem) {
+  return compact([item.title, ...(item.products || []), ...(item.companies || []), ...(item.brands || []), ...(item.evidence || [])].join(" "));
+}
 function newsMatches(row: UploadRow, items: NewsItem[]) {
-  const keyword = compact(row.keyword || "");
-  const candidates = [...[row.supplier, row.manufacturer].map(companyCore).filter((value) => value.length >= 3), ...(keyword.length >= 2 ? [companyCore(keyword)] : [])];
-  const productCandidates = [...[row.product, row.brand].map(compact).filter((value) => value.length >= 4), ...(keyword.length >= 2 ? [keyword] : [])];
+  const keyword = row.keyword || "";
+  const candidates = [...[row.supplier, row.manufacturer].flatMap((value) => newsNameTerms(value)), ...newsNameTerms(keyword, 2)];
+  const productCandidates = [...[row.product, row.brand].flatMap((value) => newsNameTerms(value, 4)), ...[row.brand].flatMap((value) => newsNameTerms(value, 3)), ...newsNameTerms(keyword, 2)];
   return items.filter((item) => {
-    const searchable = compact([item.title, ...(item.products || []), ...(item.companies || []), ...(item.brands || []), ...(item.evidence || [])].join(" "));
+    const searchable = newsSearchable(item);
     return candidates.some((name) => searchable.includes(name)) || productCandidates.some((name) => searchable.includes(name));
   }).slice(0, 3);
 }
@@ -90,12 +99,14 @@ function newsMatchBasis(row: UploadRow, item: NewsItem) {
   const fields = [row.keyword, row.supplier, row.manufacturer, row.brand, row.product].filter(Boolean) as string[];
   const title = compact(item.title);
   const bodyFields = compact([...(item.products || []), ...(item.companies || []), ...(item.brands || []), ...(item.evidence || [])].join(" "));
-  const matched = fields.find((field) => title.includes(compact(field)) || bodyFields.includes(compact(field))) || newsKey(row);
-  if (bodyFields.includes(compact(matched)) && !title.includes(compact(matched))) return `新聞內文解析出「${matched}」；屬新聞線索，仍須開啟證據句核對`;
-  return `新聞標題包含「${matched}」及風險事件詞`;
+  const match = fields.flatMap((field) => newsNameTerms(field, field === row.keyword ? 2 : 3).map((term) => ({ field, term }))).find(({ term }) => title.includes(term) || bodyFields.includes(term));
+  if (!match) return `新聞名稱與「${newsKey(row)}」可能相關；仍須開啟原文核對`;
+  if (match.term !== compact(match.field)) return `新聞名稱「${match.term}」與清單名稱「${match.field}」部分相符；僅列新聞線索，須人工核對是否為同一品牌或業者`;
+  if (bodyFields.includes(match.term) && !title.includes(match.term)) return `新聞內文解析出「${match.field}」；屬新聞線索，仍須開啟證據句核對`;
+  return `新聞標題包含「${match.field}」及風險事件詞`;
 }
 function newsEvidenceSentence(row: UploadRow, item: NewsItem) {
-  const fields = [row.keyword, row.supplier, row.manufacturer, row.brand, row.product].filter((field): field is string => Boolean(field)).map(compact);
+  const fields = [row.keyword, row.supplier, row.manufacturer, row.brand, row.product].filter((field): field is string => Boolean(field)).flatMap((field) => newsNameTerms(field, field === row.keyword ? 2 : 3));
   return item.evidence?.find((sentence) => fields.some((field) => compact(sentence).includes(field))) || item.evidence?.[0];
 }
 function searchUrl(kind: "official" | "news", query: string) {

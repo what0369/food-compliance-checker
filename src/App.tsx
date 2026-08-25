@@ -9,13 +9,13 @@ type Relation = "sameProduct" | "relatedCategory" | "sameParty" | "news";
 type Evidence = { kind: string; title: string; date: string; source: string; url: string; basis: string; relation: Relation; reason?: string; recordCompany?: string; recordProduct?: string; media?: string; action?: string; parsedProducts?: string[]; parsedCompanies?: string[]; evidenceSentence?: string; parseStatus?: "parsed" | "titleOnly" };
 type OfficialMatch = { item: OfficialItem; relation: Exclude<Relation, "news">; basis: string };
 type Result = UploadRow & { status: Status; count: number; latest: string; note: string; query: string; evidence: Evidence[] };
-type OfficialItem = { kind: string; product: string; company: string; date: string; authority: string; reason: string; url: string; manufacturer?: string; brand?: string; media?: string; action?: string; city?: string; sourceLayer?: string; matchable?: boolean };
+type OfficialItem = { kind: string; product: string; company: string; date: string; authority: string; reason: string; url: string; manufacturer?: string; brand?: string; media?: string; action?: string; city?: string; sourceLayer?: string; matchable?: boolean; parseStatus?: string };
 type LocalSource = { city: string; datasetUrl: string; mode: string; status: string; recordCount: number; message?: string };
 type NewsItem = { title: string; url: string; articleUrl?: string; date: string; source: string; region?: string; manual?: boolean; products?: string[]; companies?: string[]; brands?: string[]; evidence?: string[]; parseStatus?: "parsed" | "titleOnly"; parseMessage?: string };
 type ManualNewsItem = NewsItem & { note?: string; approvedAt?: string; issueUrl?: string };
 type NewsSubmission = { url: string; note: string };
 type DatabaseTab = "official" | "local" | "manual" | "daily";
-type DatabaseData = { official: OfficialItem[]; local: OfficialItem[]; localSources: LocalSource[]; manual: ManualNewsItem[]; daily: NewsItem[]; officialUpdatedAt: string; localUpdatedAt: string; manualUpdatedAt: string; dailyUpdatedAt: string };
+type DatabaseData = { official: OfficialItem[]; local: OfficialItem[]; localRawCount: number; localRetryCount: number; localNoEvidenceCount: number; localSources: LocalSource[]; manual: ManualNewsItem[]; daily: NewsItem[]; officialUpdatedAt: string; localUpdatedAt: string; manualUpdatedAt: string; dailyUpdatedAt: string };
 
 const LAW_URL = "https://www.fda.gov.tw/TC/newsContent.aspx?cid=3&id=30551";
 const ARTICLE_28_URL = "https://law.moj.gov.tw/LawClass/LawSingle.aspx?pcode=L0040001&flno=28";
@@ -115,6 +115,28 @@ function searchUrl(kind: "official" | "news", query: string) {
   const exact = query || "食品";
   if (kind === "news") return `https://news.google.com/search?q=${encodeURIComponent(`${exact} 違規 OR 裁罰 OR 誇大廣告`)}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant`;
   return `https://www.google.com/search?q=${encodeURIComponent(`site:fda.gov.tw OR site:gov.tw ${exact} 違規 裁罰 食品`)}`;
+}
+function localCorrectionIssueUrl(item: OfficialItem) {
+  const shown = (value?: string) => clean(value) || "未提供";
+  const body = [
+    "## 官方來源", item.url,
+    "", "## 目前網站資料",
+    `- 日期：${shown(item.date)}`,
+    `- 商品：${shown(item.product)}`,
+    `- 業者：${shown(item.company)}`,
+    `- 製造商：${shown(item.manufacturer)}`,
+    `- 主管機關：${shown(item.authority)}`,
+    "", "## 請填寫正確內容",
+    "- 商品：",
+    "- 業者：",
+    "- 製造商：",
+    "", "## 修正理由或原文位置",
+    "請說明哪一段被多抓、漏抓或欄位放錯。",
+    "", "---",
+    "管理者會核對官方來源後，調整解析規則或新增人工例外；不直接覆寫官方原始資料。",
+  ].join("\n");
+  const titleName = clean(item.product || item.company).slice(0, 45) || "地方衛生局紀錄";
+  return `${NEW_ISSUE_URL}?${new URLSearchParams({ title: `資料欄位修正：${titleName}`, body }).toString()}`;
 }
 function strongProductMatch(left: string, right: string) {
   if (!left || !right) return false;
@@ -310,7 +332,9 @@ export default function Home() {
       const local = await localResponse.json() as { records: OfficialItem[]; sources: LocalSource[]; updatedAt: string };
       const manual = await manualResponse.json() as { items: ManualNewsItem[]; updatedAt: string };
       const daily = await dailyResponse.json() as { items: NewsItem[]; updatedAt: string };
-      setDatabaseData({ official: [...official.ads, ...official.imports], local: local.records.filter((item) => item.matchable !== false), localSources: local.sources, manual: manual.items, daily: daily.items, officialUpdatedAt: official.updatedAt, localUpdatedAt: local.updatedAt, manualUpdatedAt: manual.updatedAt, dailyUpdatedAt: daily.updatedAt });
+      const localMatchable = local.records.filter((item) => item.matchable !== false);
+      const localRetryCount = local.records.filter((item) => item.parseStatus === "failed").length;
+      setDatabaseData({ official: [...official.ads, ...official.imports], local: localMatchable, localRawCount: local.records.length, localRetryCount, localNoEvidenceCount: local.records.length - localMatchable.length - localRetryCount, localSources: local.sources, manual: manual.items, daily: daily.items, officialUpdatedAt: official.updatedAt, localUpdatedAt: local.updatedAt, manualUpdatedAt: manual.updatedAt, dailyUpdatedAt: daily.updatedAt });
     } catch (cause) { setDatabaseError(cause instanceof Error ? cause.message : "資料庫讀取失敗。"); }
     finally { setDatabaseLoading(false); }
   }
@@ -537,8 +561,8 @@ export default function Home() {
 </button>
 <button className={databaseTab === "local" ? "active" : ""} onClick={() => setDatabaseTab("local")}>
 <strong>{databaseData.local.length.toLocaleString()}</strong>
-<span>地方衛生局官方紀錄</span>
-<small>更新：{displayUpdatedAt(databaseData.localUpdatedAt)}</small>
+<span>地方衛生局可查核紀錄</span>
+<small>原始 {databaseData.localRawCount.toLocaleString()}｜待重試 {databaseData.localRetryCount.toLocaleString()}｜更新：{displayUpdatedAt(databaseData.localUpdatedAt)}</small>
 </button>
 <button className={databaseTab === "manual" ? "active" : ""} onClick={() => setDatabaseTab("manual")}>
 <strong>{databaseData.manual.length.toLocaleString()}</strong>
@@ -551,7 +575,14 @@ export default function Home() {
 <small>更新：{displayUpdatedAt(databaseData.dailyUpdatedAt)}</small>
 </button>
 </div>
+{databaseTab === "local" && <div className="local-count-panel">
+<div><span>原始收錄</span><strong>{databaseData.localRawCount.toLocaleString()}</strong><small>包含可查核及暫不納入的紀錄</small></div>
+<div><span>可查核</span><strong>{databaseData.local.length.toLocaleString()}</strong><small>會參與產品與業者自動比對</small></div>
+<div><span>待重試</span><strong>{databaseData.localRetryCount.toLocaleString()}</strong><small>公告正文或 PDF 暫時解析失敗</small></div>
+<p>原始收錄 {databaseData.localRawCount.toLocaleString()}／可查核 {databaseData.local.length.toLocaleString()}／待重試 {databaseData.localRetryCount.toLocaleString()}。另有 {databaseData.localNoEvidenceCount.toLocaleString()} 筆已解析但未發現違規證據，因此不列入自動查核。</p>
+</div>}
 {databaseTab === "local" && <div className="local-source-status">{databaseData.localSources.map((source) => <a key={source.city} href={source.datasetUrl} target="_blank" rel="noreferrer"><b>{source.city}</b><span>{source.mode}</span><small className={source.status === "已連線" ? "ok" : ""}>{source.status}｜查核期間 {source.recordCount.toLocaleString()} 筆</small></a>)}</div>}
+{databaseTab === "local" && <div className="local-correction-note"><b>業者或製造商抓取錯誤？</b><span>請在該筆紀錄按「回報欄位修正」，填入正確內容。管理者核對官方來源後會調整解析規則或新增人工例外，原始資料仍保留不覆寫。</span></div>}
 <div className="database-toolbar">
 <label htmlFor="database-search">搜尋目前資料</label>
 <input id="database-search" value={databaseQuery} onChange={(e) => setDatabaseQuery(e.target.value)} placeholder="輸入商品、品牌、供應商、製造商或新聞關鍵字"/>
@@ -587,6 +618,7 @@ export default function Home() {
 <td>
 <small>{[item.authority, item.sourceLayer].filter(Boolean).join("｜")}</small>
 <a href={item.url} target="_blank" rel="noreferrer">開啟官方來源 ↗</a>
+{databaseTab === "local" && <a className="correction-link" href={localCorrectionIssueUrl(item)} target="_blank" rel="noreferrer">回報欄位修正 ↗</a>}
 </td>
 </tr> : <tr key={`${item.date}-${item.url}-${index}`}>
 <td>

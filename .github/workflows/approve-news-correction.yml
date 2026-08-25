@@ -29,7 +29,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add public/data/news-corrections.json public/data/news.json
+          git add public/data/news-corrections.json public/data/news.json public/data/manual-news.json
           git commit -m "套用每日新聞解析修正 #${{ github.event.issue.number }}"
           git push
       - name: 回覆並關閉議題

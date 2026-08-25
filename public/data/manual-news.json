@@ -1,5 +1,7 @@
 {
-  "updatedAt": "2026-08-19T02:35:00.000Z",
+  "updatedAt": "2026-08-25T07:53:47.734Z",
+  "parsedCount": 1,
+  "titleOnlyCount": 0,
   "items": [
     {
       "title": "食安中心揭2款Olitalia橄欖油含礦物油籲停售下架 附4大選油技巧",
@@ -10,7 +12,23 @@
       "note": "涉及 Olitalia Pomace Olive Oil 1L 與 5L；列為海外風險線索，不等同台灣違規紀錄。",
       "manual": true,
       "approvedAt": "2026-08-19T02:35:00.000Z",
-      "issueUrl": ""
+      "issueUrl": "",
+      "articleUrl": "https://www.hk01.com/%E8%A6%AA%E5%AD%90/60379746/%E9%A3%9F%E5%AE%89%E4%B8%AD%E5%BF%83%E6%8F%AD2%E6%AC%BEolitalia%E6%A9%84%E6%AC%96%E6%B2%B9%E5%90%AB%E7%A4%A6%E7%89%A9%E6%B2%B9%E7%B1%B2%E5%81%9C%E5%94%AE%E4%B8%8B%E6%9E%B6-%E9%99%844%E5%A4%A7%E9%81%B8%E6%B2%B9%E6%8A%80%E5%B7%A7",
+      "parseStatus": "parsed",
+      "parseVersion": 4,
+      "parsedAt": "2026-08-25T07:53:47.879Z",
+      "products": [
+        "Pomace Olive Oil（橄欖果渣油）",
+        "Olitalia Pomace Olive Oil 1L",
+        "Olitalia Pomace Olive Oil 5L"
+      ],
+      "companies": [],
+      "brands": [
+        "Olitalia"
+      ],
+      "evidence": [
+        "食安中心揭2款Olitalia橄欖油含礦物油籲停售下架 附4大選油技巧。"
+      ]
     }
   ]
 }

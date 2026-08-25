@@ -11,7 +11,7 @@ type OfficialMatch = { item: OfficialItem; relation: Exclude<Relation, "news">; 
 type Result = UploadRow & { status: Status; count: number; latest: string; note: string; query: string; evidence: Evidence[] };
 type OfficialItem = { kind: string; product: string; company: string; date: string; authority: string; reason: string; url: string; manufacturer?: string; brand?: string; media?: string; action?: string; city?: string; sourceLayer?: string; matchable?: boolean; parseStatus?: string; correctionIssueUrl?: string; correctionNote?: string; correctionApprovedAt?: string };
 type LocalSource = { city: string; datasetUrl: string; mode: string; status: string; recordCount: number; message?: string };
-type NewsItem = { title: string; url: string; articleUrl?: string; date: string; source: string; region?: string; manual?: boolean; products?: string[]; companies?: string[]; brands?: string[]; evidence?: string[]; parseStatus?: "parsed" | "titleOnly"; parseMessage?: string; correctionIssueUrl?: string; correctionNote?: string; correctionApprovedAt?: string; originalParsedEntities?: { products?: string[]; companies?: string[]; brands?: string[]; evidence?: string[] } };
+type NewsItem = { title: string; url: string; articleUrl?: string; date: string; source: string; region?: string; manual?: boolean; note?: string; products?: string[]; companies?: string[]; brands?: string[]; evidence?: string[]; parseStatus?: "parsed" | "titleOnly"; parseMessage?: string; correctionIssueUrl?: string; correctionNote?: string; correctionApprovedAt?: string; originalParsedEntities?: { products?: string[]; companies?: string[]; brands?: string[]; evidence?: string[] } };
 type ManualNewsItem = NewsItem & { note?: string; approvedAt?: string; issueUrl?: string };
 type NewsSubmission = { url: string; note: string };
 type LocalCorrectionSubmission = { product: string; company: string; manufacturer: string; reason: string };
@@ -94,7 +94,7 @@ function newsNameTerms(value: string, minimumLength = 3) {
   return [...new Set([full, withoutCategory])].filter((term) => term.length >= minimumLength);
 }
 function newsSearchable(item: NewsItem) {
-  return compact([item.title, ...(item.products || []), ...(item.companies || []), ...(item.brands || []), ...(item.evidence || [])].join(" "));
+  return compact([item.title, item.note || "", ...(item.products || []), ...(item.companies || []), ...(item.brands || []), ...(item.evidence || [])].join(" "));
 }
 function newsMatches(row: UploadRow, items: NewsItem[]) {
   const keyword = row.keyword || "";
@@ -108,7 +108,7 @@ function newsMatches(row: UploadRow, items: NewsItem[]) {
 function newsMatchBasis(row: UploadRow, item: NewsItem) {
   const fields = [row.keyword, row.supplier, row.manufacturer, row.brand, row.product].filter(Boolean) as string[];
   const title = compact(item.title);
-  const bodyFields = compact([...(item.products || []), ...(item.companies || []), ...(item.brands || []), ...(item.evidence || [])].join(" "));
+  const bodyFields = compact([item.note || "", ...(item.products || []), ...(item.companies || []), ...(item.brands || []), ...(item.evidence || [])].join(" "));
   const match = fields.flatMap((field) => newsNameTerms(field, field === row.keyword ? 2 : 3).map((term) => ({ field, term }))).find(({ term }) => title.includes(term) || bodyFields.includes(term));
   if (!match) return `新聞名稱與「${newsKey(row)}」可能相關；仍須開啟原文核對`;
   if (match.term !== compact(match.field)) return `新聞名稱「${match.term}」與清單名稱「${match.field}」部分相符；僅列新聞線索，須人工核對是否為同一品牌或業者`;
@@ -466,7 +466,7 @@ export default function Home() {
     const date = new Date().toISOString().slice(0, 10);
     const title = data.note.split(/\r?\n/).find(Boolean)?.slice(0, 80) || `新聞線索（${source}）`;
     const safeNote = data.note.replace(/^## /gm, "＃＃ ").slice(0, 1500);
-    const body = [`## 新聞標題`, title, ``, `## 新聞網址`, data.url, ``, `## 發布日期`, date, ``, `## 地區／主管機關`, `待確認`, ``, `## 新聞來源`, source, ``, `## 補充說明`, safeNote, ``, `---`, `系統已由網址自動整理來源及提交日期。管理者確認原文、日期、地區與同一性後，請留言：/收錄`].join("\n");
+    const body = [`## 新聞標題`, title, ``, `## 新聞網址`, data.url, ``, `## 發布日期`, date, ``, `## 地區／主管機關`, `待確認`, ``, `## 新聞來源`, source, ``, `## 補充說明`, safeNote, ``, `---`, `系統已由網址自動整理來源及提交日期。管理者核准後會立即解析新聞內文；若原站暫時無法讀取，系統會標示僅取得標題並在每日更新時重試。`].join("\n");
     const params = new URLSearchParams({ title: `新聞線索：${title}`, body });
     return { body, url: `${NEW_ISSUE_URL}?${params.toString()}` };
   }
@@ -781,7 +781,7 @@ export default function Home() {
 <button className="close" onClick={() => { setSubmittingNews(false); setNewsSubmitStatus(""); }}>×</button>
 <p className="eyebrow">NEWS SUBMISSION</p>
 <h2>提交新聞線索</h2>
-<p className="modal-intro">只要貼上新聞網址並簡單說明產品、品牌或事件。新聞來源與提交日期會自動整理，管理者核准後才納入共用資料庫。</p>
+<p className="modal-intro">只要貼上新聞網址並簡單說明產品、品牌或事件。管理者核准後，系統會解析新聞內文中的商品、品牌、相關業者與證據句，再納入共用資料庫。</p>
 <div className="news-form">
 <label>新聞網址<input type="url" value={newsSubmission.url} onChange={(e) => { setNewsSubmission({ ...newsSubmission, url: e.target.value }); setError(""); }} placeholder="https://..."/>
 </label>
@@ -789,7 +789,7 @@ export default function Home() {
 </label>
 </div>{error && <p className="error modal-error">{error}</p>}<button className="primary analyze" disabled={!newsSubmission.url.trim() || !newsSubmission.note.trim()} onClick={submitNewsForReview}>前往 GitHub 送出審核</button>
 {newsSubmitStatus && <div className="github-fallback"><p>{newsSubmitStatus}</p><div><button onClick={copyNewsIssue}>複製送審內容</button><a href={NEW_ISSUE_URL} target="_blank" rel="noreferrer">開啟空白 Issue ↗</a></div></div>}
-<p className="github-note">需要登入免費 GitHub 帳號。管理者確認原文後，在議題留言「/收錄」，網站就會自動更新。</p>
+<p className="github-note">需要登入免費 GitHub 帳號。管理者在管理審核頁核准後，網站會解析內文並自動更新；暫時讀不到原文時會於每日更新重試。</p>
 </section>
 </div>}
     {correctionItem && <div className="modal-backdrop correction-modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && closeCorrectionForm()}>
@@ -889,7 +889,7 @@ export default function Home() {
 </div>}
 {databaseTab === "local" && <div className="local-source-status">{databaseData.localSources.map((source) => <a key={source.city} href={source.datasetUrl} target="_blank" rel="noreferrer"><b>{source.city}</b><span>{source.mode}</span><small className={source.status.startsWith("已") ? "ok" : ""}>{source.status}｜查核期間 {source.recordCount.toLocaleString()} 筆</small></a>)}</div>}
 {databaseTab === "local" && <div className="local-correction-note"><b>業者或製造商抓取錯誤？</b><span>請在該筆紀錄按「提出欄位修正」，填入正確內容。管理者核對官方來源後，在管理審核頁勾選核准即可重新發布；原始資料仍保留不覆寫。</span></div>}
-{databaseTab === "daily" && <div className="local-correction-note"><b>新聞解析內容抓錯？</b><span>請在該篇新聞按「回報新聞解析修正」，修正商品、品牌、相關業者或證據句。人工核准後會在每日更新後重新套用，原始解析結果仍保留。</span></div>}
+{(databaseTab === "daily" || databaseTab === "manual") && <div className="local-correction-note"><b>新聞解析內容抓錯？</b><span>請在該篇新聞按「回報新聞解析修正」，修正商品、品牌、相關業者或證據句。人工核准後會在每日更新後重新套用，原始解析結果仍保留。</span></div>}
 <div className="database-toolbar">
 <label htmlFor="database-search">搜尋目前資料</label>
 <input id="database-search" value={databaseQuery} onChange={(e) => setDatabaseQuery(e.target.value)} placeholder="輸入商品、品牌、供應商、製造商或新聞關鍵字"/>
@@ -935,12 +935,12 @@ export default function Home() {
 </td>
 <td>
 <strong>{item.title}</strong>
-{databaseTab === "daily" && <div className="news-entities"><div className="parse-badges"><span className={`parse-badge ${item.parseStatus === "parsed" ? "parsed" : "title-only"}`}>{item.parseStatus === "parsed" ? "新聞內文已解析" : "僅取得標題"}</span>{item.correctionIssueUrl && <span className="parse-badge corrected">✓ 人工核准解析修正</span>}</div>{item.products?.length || item.brands?.length ? <small>商品／品牌：{[...(item.products || []), ...(item.brands || [])].join("、")}</small> : null}{item.companies?.length ? <small>來源／相關業者：{item.companies.join("、")}</small> : null}{item.evidence?.[0] ? <small>證據句：{item.evidence[0]}</small> : null}</div>}
+{(databaseTab === "daily" || databaseTab === "manual") && <div className="news-entities"><div className="parse-badges"><span className={`parse-badge ${item.parseStatus === "parsed" ? "parsed" : "title-only"}`}>{item.parseStatus === "parsed" ? "新聞內文已解析" : item.parseStatus === "titleOnly" ? "僅取得標題" : "待補解析"}</span>{item.correctionIssueUrl && <span className="parse-badge corrected">✓ 人工核准解析修正</span>}</div>{item.products?.length || item.brands?.length ? <small>商品／品牌：{[...(item.products || []), ...(item.brands || [])].join("、")}</small> : null}{item.companies?.length ? <small>來源／相關業者：{item.companies.join("、")}</small> : null}{item.evidence?.[0] ? <small>證據句：{item.evidence[0]}</small> : null}</div>}
 </td>
 <td>
 <span>{item.region || (databaseTab === "daily" ? "新聞搜尋線索" : "未提供")}</span>{item.note && <small>{item.note}</small>}</td>
 <td>
-<a href={item.articleUrl || item.url} target="_blank" rel="noreferrer">開啟新聞原文 ↗</a>{item.issueUrl && <a href={item.issueUrl} target="_blank" rel="noreferrer">審核紀錄 ↗</a>}{databaseTab === "daily" && <button className="correction-link correction-button" onClick={() => openNewsCorrectionForm(item)}>回報新聞解析修正</button>}{databaseTab === "daily" && item.correctionIssueUrl && <a className="correction-link" href={item.correctionIssueUrl} target="_blank" rel="noreferrer">查看解析修正審核 ↗</a>}</td>
+<a href={item.articleUrl || item.url} target="_blank" rel="noreferrer">開啟新聞原文 ↗</a>{item.issueUrl && <a href={item.issueUrl} target="_blank" rel="noreferrer">審核紀錄 ↗</a>}{(databaseTab === "daily" || databaseTab === "manual") && <button className="correction-link correction-button" onClick={() => openNewsCorrectionForm(item)}>回報新聞解析修正</button>}{(databaseTab === "daily" || databaseTab === "manual") && item.correctionIssueUrl && <a className="correction-link" href={item.correctionIssueUrl} target="_blank" rel="noreferrer">查看解析修正審核 ↗</a>}</td>
 </tr>)}</tbody>
 </table>{databaseFiltered.length === 0 && <div className="database-empty">沒有符合的資料，請換一個關鍵字。</div>}</div>{databaseFiltered.length > 100 && <p className="database-limit">為保持頁面順暢，目前顯示前 100 筆；請輸入關鍵字縮小範圍。</p>}</>}</div>
 </section>}
@@ -1116,7 +1116,11 @@ export default function Home() {
 </div>
 <div>
 <dt>核准方式</dt>
-<dd>管理者在 GitHub 審核原文、日期、產品或業者同一性後，留言「/收錄」才寫入共用資料</dd>
+<dd>管理者在管理審核頁核對原文後核准；系統立即解析商品、品牌、相關業者與證據句，再寫入共用資料</dd>
+</div>
+<div>
+<dt>解析重試</dt>
+<dd>若新聞網站暫時阻擋或只取得標題，資料會清楚標示，並在每日更新時自動重試；補充說明可協助搜尋，但不視為已查證證據</dd>
 </div>
 <div>
 <dt>用途</dt>

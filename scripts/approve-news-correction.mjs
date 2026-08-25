@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { applyNewsCorrections, NEWS_CORRECTIONS_FILE, newsCorrectionMatches } from "./news-corrections.mjs";
 
 const NEWS_FILE = new URL("../public/data/news.json", import.meta.url);
+const MANUAL_NEWS_FILE = new URL("../public/data/manual-news.json", import.meta.url);
 const CLEAR_VALUES = new Set(["刪除", "清除", "留空", "未提供", "無"]);
 const text = (value) => String(value ?? "").trim();
 
@@ -49,8 +50,11 @@ export function parseNewsCorrectionIssue(body, issueUrl = "") {
 
 export async function approveNewsCorrection(body = process.env.ISSUE_BODY || "", issueUrl = process.env.ISSUE_URL || "") {
   const parsed = parseNewsCorrectionIssue(body, issueUrl);
-  const data = JSON.parse(await readFile(NEWS_FILE, "utf8"));
-  const matched = data.items.filter((item) => newsCorrectionMatches(item, parsed));
+  const [data, manualData] = await Promise.all([
+    readFile(NEWS_FILE, "utf8").then(JSON.parse),
+    readFile(MANUAL_NEWS_FILE, "utf8").then(JSON.parse),
+  ]);
+  const matched = [...data.items, ...(manualData.items || [])].filter((item) => newsCorrectionMatches(item, parsed));
   if (matched.length !== 1) throw new Error(`新聞解析修正應對應 1 筆目前資料，實際找到 ${matched.length} 筆`);
 
   const current = JSON.parse(await readFile(NEWS_CORRECTIONS_FILE, "utf8").catch(() => '{"items":[]}'));
@@ -61,9 +65,11 @@ export async function approveNewsCorrection(body = process.env.ISSUE_BODY || "",
   if (index >= 0) items[index] = correction; else items.unshift(correction);
 
   const records = applyNewsCorrections(data.items, [correction]);
+  const manualRecords = applyNewsCorrections(manualData.items || [], [correction]);
   const updatedAt = new Date().toISOString();
   await writeFile(NEWS_CORRECTIONS_FILE, JSON.stringify({ updatedAt, items }, null, 2) + "\n");
   await writeFile(NEWS_FILE, JSON.stringify({ ...data, updatedAt, items: records }));
+  await writeFile(MANUAL_NEWS_FILE, JSON.stringify({ ...manualData, updatedAt, items: manualRecords }, null, 2) + "\n");
   return correction;
 }
 

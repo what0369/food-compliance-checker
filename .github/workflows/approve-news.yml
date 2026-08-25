@@ -20,7 +20,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: 寫入人工核准新聞庫
+      - name: 解析內文並寫入人工核准新聞庫
         run: node scripts/approve-news.mjs
         env:
           ISSUE_BODY: ${{ github.event.issue.body }}
@@ -37,6 +37,6 @@ jobs:
             git push
           fi
       - name: 回覆並關閉議題
-        run: gh issue close "${{ github.event.issue.number }}" --comment "已核准並納入共用新聞資料庫；網站將自動重新發布。"
+        run: gh issue close "${{ github.event.issue.number }}" --comment "已核准並完成新聞內文解析；若原站暫時無法讀取則標示為僅取得標題，系統會於每日更新重試。網站將自動重新發布。"
         env:
           GH_TOKEN: ${{ github.token }}

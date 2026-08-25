@@ -1,4 +1,6 @@
 import { readFile, writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { updateLocalOfficial } from "./update-local-data.mjs";
 import { applyNewsCorrections, loadNewsCorrections, restoreNewsOriginal } from "./news-corrections.mjs";
 
@@ -7,10 +9,11 @@ const IMPORTS_URL = "https://data.fda.gov.tw/data/opendata/52/json";
 const ADS_PAGE = "https://data.gov.tw/dataset/6949";
 const IMPORTS_PAGE = "https://data.gov.tw/dataset/6133";
 const NEWS_FILE = new URL("../public/data/news.json", import.meta.url);
+const MANUAL_NEWS_FILE = new URL("../public/data/manual-news.json", import.meta.url);
 const OFFICIAL_FILE = new URL("../public/data/official.json", import.meta.url);
 const RISK_TERMS = ["違規", "裁罰", "誇大", "下架", "不合格", "回收", "處分", "遭罰", "開罰"];
 const ARTICLE_PARSE_LIMIT = 60;
-const NEWS_PARSE_VERSION = 2;
+export const NEWS_PARSE_VERSION = 4;
 const COMPANY_SUFFIX = "(?:股份有限公司|有限公司|企業社|商行|商號|油行|油廠|食品廠|工廠|合作社|農場|實業|企業|公司)";
 
 const value = (row, key) => String(row[key] ?? "").trim();
@@ -135,17 +138,21 @@ function extractEntities(title, articleText) {
     ...[...text.matchAll(new RegExp(`(?:製造商|製造業者|進口商|供應商|來源業者|原料來源|油品來源|販售業者|業者|委製商|委託|出品)(?:為|是)?[：:、，,\\s「『]*(.{2,28}?${COMPANY_SUFFIX})`, "g"))].map((match) => match[1]),
     ...[...text.matchAll(new RegExp(`(?:^|[「『（(、，,；;。：:\\s])([\p{Script=Han}A-Za-z0-9．・&（）()\-]{2,20}${COMPANY_SUFFIX})`, "gu"))].map((match) => match[1]),
   ].map((item) => item.replace(/^[為是「『（(、，,：:\s]+|[」』）)、，,。；;：:\s]+$/g, "")), 15);
-  const labelledProducts = [...text.matchAll(/(?:產品|商品|品名|不合格品項|下架品項|回收品項|抽驗品項)[為是：:\s「『]*([^。；;，,]{2,45})/g)].map((match) => match[1]);
-  const quotedProducts = [...text.matchAll(/[「『]([^」』]{2,35})[」』]/g)].map((match) => match[1]).filter((item) => RISK_TERMS.some((term) => text.includes(`${item}`)) && !/衛生局|食藥署|政府|新聞/.test(item));
-  const products = uniqueText([...labelledProducts, ...quotedProducts].map((item) => item.replace(/(?:等|共\d+件|遭.*|被.*)$/g, "").trim()).filter((item) => item.length <= 45 && !/^(?:共計|均已|是否|應|管理|規定|限量|回收|下架|調查|來源|食品添加物|登錄|業者)/.test(item)), 15);
-  const brands = uniqueText([...text.matchAll(/(?:品牌|牌名)[為是：:\s「『]*([^。；;，,」』]{2,30})/g)].map((match) => match[1]), 10);
+  const labelledProducts = [...text.matchAll(/(?:產品名稱|商品名稱|不合格品項|下架品項|回收品項|抽驗品項|產品|商品|品名)[為是：:\s「『]*([^。；;，,]{2,45}?)(?=\s*(?:產品名稱|商品名稱|品牌名稱|品牌|牌名|製造商|進口商|業者)[為是：:]|[。；;，,]|$)/g)].map((match) => match[1]);
+  const quotedProducts = [...text.matchAll(/[「『]([^」』]{2,35})[」』]/g)].filter((match) => {
+    const nearby = text.slice(Math.max(0, (match.index || 0) - 100), (match.index || 0) + match[0].length + 100);
+    return RISK_TERMS.some((term) => nearby.includes(term)) && !/衛生局|食藥署|政府|新聞|漏洞|毒素|健康/.test(match[1]);
+  }).map((match) => match[1]);
+  const sizedProducts = [...text.matchAll(/\b([A-Z][A-Za-z0-9&.'’()-]*(?:\s+[A-Za-z0-9&.'’()-]+){1,7}\s+\d+(?:\.\d+)?\s?(?:ml|l|g|kg))\b/gi)].map((match) => match[1]);
+  const products = uniqueText([...labelledProducts, ...quotedProducts, ...sizedProducts].map((item) => item.replace(/^(?:名稱|品名)[為是：:\s]+/, "").replace(/(?:等|共\d+件|遭.*|被.*)$/g, "").replace(/^[「『\s]+|[」』\s]+$/g, "").trim()).filter((item) => item.length <= 45 && !/(?:全線停售|立即下架|未知|漏洞|累積毒素|保障.*健康)/.test(item) && !/^(?:共計|均已|是否|應|管理|規定|限量|回收|下架|調查|來源|食品添加物|登錄|業者|出現)/.test(item)), 15);
+  const brands = uniqueText([...text.matchAll(/(?:品牌名稱|品牌|牌名)[為是：:\s「『]*([^。；;，,」』]{2,30}?)(?=\s*(?:產品名稱|商品名稱|產品|商品|品名|製造商|進口商|業者)[為是：:]|[。；;，,」』]|$)/g)].map((match) => match[1].replace(/^(?:名稱)[為是：:\s]+/, "").trim()), 10);
   const sentences = text.split(/(?<=[。！？!?；;])\s*/).map((item) => item.trim()).filter((item) => item.length >= 12 && item.length <= 260);
   const names = [...companies, ...products, ...brands];
   const evidence = uniqueText(sentences.filter((sentence) => RISK_TERMS.some((term) => sentence.includes(term)) && (names.length === 0 || names.some((name) => sentence.includes(name)))).map((sentence) => sentence.slice(0, 220)), 3);
   return { products, companies, brands, evidence };
 }
 
-async function enrichNewsItem(item) {
+export async function enrichNewsItem(item) {
   try {
     const { articleUrl, text } = await fetchArticle(item.url);
     const entities = extractEntities(item.title, text);
@@ -241,8 +248,23 @@ async function updateNews(now, since) {
   await writeFile(NEWS_FILE, JSON.stringify({ updatedAt: now.toISOString(), available: true, parsedCount, titleOnlyCount: items.length - parsedCount, items }));
 }
 
-const now = new Date();
-// 年度制：查核本年度與前一完整年度；例如 2026 年為 2025-01-01 至今。
-const since = new Date(Date.UTC(now.getUTCFullYear() - 1, 0, 1));
-await Promise.all([updateOfficial(now, since), updateNews(now, since), updateLocalOfficial(now)]);
-console.log(`完成：中央官方、地方衛生局與新聞資料更新至 ${now.toISOString()}`);
+export async function updateManualNews(now = new Date()) {
+  const previous = JSON.parse(await readFile(MANUAL_NEWS_FILE, "utf8").catch(() => '{"items":[]}'));
+  const baseItems = (previous.items || []).map(restoreNewsOriginal);
+  const candidates = baseItems.filter((item) => item.parseStatus !== "parsed" || item.parseVersion !== NEWS_PARSE_VERSION).slice(0, ARTICLE_PARSE_LIMIT);
+  const enriched = await mapConcurrent(candidates, 4, enrichNewsItem);
+  const enrichedByUrl = new Map(enriched.map((item) => [item.url, item]));
+  const parsedItems = baseItems.map((item) => enrichedByUrl.get(item.url) || item);
+  const items = applyNewsCorrections(parsedItems, await loadNewsCorrections());
+  const parsedCount = items.filter((item) => item.parseStatus === "parsed").length;
+  await writeFile(MANUAL_NEWS_FILE, JSON.stringify({ updatedAt: now.toISOString(), parsedCount, titleOnlyCount: items.length - parsedCount, items }, null, 2) + "\n");
+}
+
+export async function updateAllData(now = new Date()) {
+  // 年度制：查核本年度與前一完整年度；例如 2026 年為 2025-01-01 至今。
+  const since = new Date(Date.UTC(now.getUTCFullYear() - 1, 0, 1));
+  await Promise.all([updateOfficial(now, since), updateNews(now, since), updateManualNews(now), updateLocalOfficial(now)]);
+  console.log(`完成：中央官方、地方衛生局、每日新聞與人工新聞資料更新至 ${now.toISOString()}`);
+}
+
+if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) await updateAllData();

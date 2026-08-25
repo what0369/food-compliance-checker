@@ -1,4 +1,5 @@
 import { readFile, writeFile } from "node:fs/promises";
+import { enrichNewsItem } from "./update-data.mjs";
 
 const file = new URL("../public/data/manual-news.json", import.meta.url);
 const body = process.env.ISSUE_BODY || "";
@@ -28,7 +29,10 @@ if (!/^\d{4}-\d{2}-\d{2}$/.test(item.date)) throw new Error("發布日期格式�
 const current = JSON.parse(await readFile(file, "utf8").catch(() => '{"items":[]}'));
 const items = Array.isArray(current.items) ? current.items : [];
 const normalized = item.url.replace(/\/$/, "").toLowerCase();
-const duplicate = items.some((existing) => String(existing.url || "").replace(/\/$/, "").toLowerCase() === normalized);
-if (!duplicate) items.unshift(item);
-await writeFile(file, JSON.stringify({ updatedAt: new Date().toISOString(), items }, null, 2) + "\n");
-console.log(duplicate ? "新聞已存在，未重複加入" : `已加入：${item.title}`);
+const duplicateIndex = items.findIndex((existing) => String(existing.url || "").replace(/\/$/, "").toLowerCase() === normalized);
+const enriched = await enrichNewsItem(item);
+if (duplicateIndex >= 0) items[duplicateIndex] = { ...items[duplicateIndex], ...enriched, approvedAt: items[duplicateIndex].approvedAt || item.approvedAt, issueUrl: items[duplicateIndex].issueUrl || item.issueUrl };
+else items.unshift(enriched);
+const parsedCount = items.filter((entry) => entry.parseStatus === "parsed").length;
+await writeFile(file, JSON.stringify({ updatedAt: new Date().toISOString(), parsedCount, titleOnlyCount: items.length - parsedCount, items }, null, 2) + "\n");
+console.log(`${duplicateIndex >= 0 ? "已重新解析" : "已加入"}：${item.title}（${enriched.parseStatus === "parsed" ? "內文解析成功" : "僅取得標題"}）`);

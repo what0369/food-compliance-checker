@@ -3,13 +3,15 @@
 import { useMemo, useRef, useState } from "react";
 import * as XLSX from "xlsx";
 
-type UploadRow = { product: string; supplier: string; brand: string; manufacturer: string; taxId: string; adUrl: string; claimText: string; keyword?: string };
-type Status = "產品紀錄命中" | "供應商紀錄命中" | "新聞疑似命中" | "本次未命中" | "資料不足";
-type Evidence = { kind: string; title: string; date: string; source: string; url: string; basis: string; reason?: string; recordCompany?: string; recordProduct?: string; media?: string; action?: string };
+type UploadRow = { product: string; contents: string; supplier: string; brand: string; manufacturer: string; taxId: string; adUrl: string; claimText: string; keyword?: string };
+type Status = "同商品紀錄" | "相關品類，需加強查證" | "同品牌／供應商其他商品" | "新聞線索" | "本次未命中" | "資料不足";
+type Relation = "sameProduct" | "relatedCategory" | "sameParty" | "news";
+type Evidence = { kind: string; title: string; date: string; source: string; url: string; basis: string; relation: Relation; reason?: string; recordCompany?: string; recordProduct?: string; media?: string; action?: string; parsedProducts?: string[]; parsedCompanies?: string[]; evidenceSentence?: string; parseStatus?: "parsed" | "titleOnly" };
+type OfficialMatch = { item: OfficialItem; relation: Exclude<Relation, "news">; basis: string };
 type Result = UploadRow & { status: Status; count: number; latest: string; note: string; query: string; evidence: Evidence[] };
 type OfficialItem = { kind: string; product: string; company: string; date: string; authority: string; reason: string; url: string; manufacturer?: string; brand?: string; media?: string; action?: string; city?: string; sourceLayer?: string; matchable?: boolean };
 type LocalSource = { city: string; datasetUrl: string; mode: string; status: string; recordCount: number; message?: string };
-type NewsItem = { title: string; url: string; date: string; source: string; region?: string; manual?: boolean };
+type NewsItem = { title: string; url: string; articleUrl?: string; date: string; source: string; region?: string; manual?: boolean; products?: string[]; companies?: string[]; brands?: string[]; evidence?: string[]; parseStatus?: "parsed" | "titleOnly"; parseMessage?: string };
 type ManualNewsItem = NewsItem & { note?: string; approvedAt?: string; issueUrl?: string };
 type NewsSubmission = { url: string; note: string };
 type DatabaseTab = "official" | "local" | "manual" | "daily";
@@ -21,13 +23,14 @@ const ADS_DATASET_URL = "https://data.gov.tw/dataset/6949";
 const IMPORTS_DATASET_URL = "https://data.gov.tw/dataset/6133";
 const GOOGLE_NEWS_URL = "https://news.google.com/home?hl=zh-TW&gl=TW&ceid=TW:zh-Hant";
 const LOCAL_HEALTH_URL = "https://service.mohw.gov.tw/HealthCenter/";
+const HEALTH_NEWS_URL = "https://www.fda.gov.tw/tc/csmnews.aspx";
 const NEW_ISSUE_URL = "https://github.com/what0369/food-compliance-checker/issues/new";
 const ISSUES_URL = "https://github.com/what0369/food-compliance-checker/issues";
-const STORAGE_KEY = "food-compliance-free-check-v5";
+const STORAGE_KEY = "food-compliance-free-check-v6";
 const SAMPLE_ROWS: UploadRow[] = [
-  { product: "Slimmit食事對抗酵素", supplier: "健康生活商行", brand: "Slimmit", manufacturer: "", taxId: "", adUrl: "", claimText: "六個月降低體重，促進代謝並降低膽固醇。" },
-  { product: "原味燕麥片", supplier: "日常食品股份有限公司", brand: "日日好食", manufacturer: "", taxId: "", adUrl: "", claimText: "" },
-  { product: "媽媽蔛 3包組合", supplier: "美好購物網", brand: "媽媽蔛", manufacturer: "", taxId: "", adUrl: "", claimText: "" },
+  { product: "Slimmit食事對抗酵素", contents: "", supplier: "健康生活商行", brand: "Slimmit", manufacturer: "", taxId: "", adUrl: "", claimText: "六個月降低體重，促進代謝並降低膽固醇。" },
+  { product: "原味燕麥片", contents: "燕麥", supplier: "日常食品股份有限公司", brand: "日日好食", manufacturer: "", taxId: "", adUrl: "", claimText: "" },
+  { product: "媽媽蔛 3包組合", contents: "", supplier: "美好購物網", brand: "媽媽蔛", manufacturer: "", taxId: "", adUrl: "", claimText: "" },
 ];
 
 const clean = (value: unknown) => String(value ?? "").trim();
@@ -60,6 +63,7 @@ function parseWorkbookRows(workbook: XLSX.WorkBook) {
     const raw = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: "", range: headerIndex });
     const rows = raw.map((row) => ({
       product: findValue(row, ["品項名稱", "產品名稱", "子產品名稱", "商品名稱", "品名", "產品", "商品"]),
+      contents: findValue(row, ["完整內容物", "內容物名稱", "內容物", "成分"]),
       supplier: findValue(row, ["商戶名稱(提案公司二)", "公司登記名稱", "供應商名稱", "供應商", "業者名稱", "公司名稱", "業者"]),
       brand: findValue(row, ["品牌完整名稱", "商家名稱", "品牌名稱", "品牌"]),
       manufacturer: findValue(row, ["製造商／進口商名稱", "製造商/進口商名稱", "製造商", "進口商"]),
@@ -78,9 +82,21 @@ function newsMatches(row: UploadRow, items: NewsItem[]) {
   const candidates = [...[row.supplier, row.manufacturer].map(companyCore).filter((value) => value.length >= 3), ...(keyword.length >= 2 ? [companyCore(keyword)] : [])];
   const productCandidates = [...[row.product, row.brand].map(compact).filter((value) => value.length >= 4), ...(keyword.length >= 2 ? [keyword] : [])];
   return items.filter((item) => {
-    const title = compact(item.title);
-    return candidates.some((name) => title.includes(name)) || productCandidates.some((name) => title.includes(name));
+    const searchable = compact([item.title, ...(item.products || []), ...(item.companies || []), ...(item.brands || []), ...(item.evidence || [])].join(" "));
+    return candidates.some((name) => searchable.includes(name)) || productCandidates.some((name) => searchable.includes(name));
   }).slice(0, 3);
+}
+function newsMatchBasis(row: UploadRow, item: NewsItem) {
+  const fields = [row.keyword, row.supplier, row.manufacturer, row.brand, row.product].filter(Boolean) as string[];
+  const title = compact(item.title);
+  const bodyFields = compact([...(item.products || []), ...(item.companies || []), ...(item.brands || []), ...(item.evidence || [])].join(" "));
+  const matched = fields.find((field) => title.includes(compact(field)) || bodyFields.includes(compact(field))) || newsKey(row);
+  if (bodyFields.includes(compact(matched)) && !title.includes(compact(matched))) return `新聞內文解析出「${matched}」；屬新聞線索，仍須開啟證據句核對`;
+  return `新聞標題包含「${matched}」及風險事件詞`;
+}
+function newsEvidenceSentence(row: UploadRow, item: NewsItem) {
+  const fields = [row.keyword, row.supplier, row.manufacturer, row.brand, row.product].filter((field): field is string => Boolean(field)).map(compact);
+  return item.evidence?.find((sentence) => fields.some((field) => compact(sentence).includes(field))) || item.evidence?.[0];
 }
 function searchUrl(kind: "official" | "news", query: string) {
   const exact = query || "食品";
@@ -94,22 +110,37 @@ function strongProductMatch(left: string, right: string) {
   const longer = Math.max(left.length, right.length);
   return shorter >= 6 && shorter / longer >= 0.75 && (left.includes(right) || right.includes(left));
 }
+const CATEGORY_FAMILIES = [
+  ["辣椒", "脆椒", "辣油", "椒麻", "川辣"], ["花椒", "麻辣"], ["胡椒"], ["咖哩", "香料"],
+  ["芝麻", "麻仁"], ["花生"], ["堅果"], ["食用油", "沙拉油", "調和油", "橄欖油"],
+  ["牛肉"], ["豬肉"], ["雞肉", "雞精"], ["魚", "鱈魚"], ["蝦"], ["蟹"],
+  ["米", "米果"], ["茶"], ["咖啡"], ["蜂蜜"], ["燕窩"], ["蛋"], ["乳", "奶"], ["菇", "菌"],
+];
+function relatedCategoryMatch(row: UploadRow, item: OfficialItem) {
+  const rowText = compact([row.product, row.contents].filter(Boolean).join(" "));
+  const itemText = compact(item.product);
+  if (!rowText || !itemText) return false;
+  return CATEGORY_FAMILIES.some((family) => family.some((term) => rowText.includes(term)) && family.some((term) => itemText.includes(term)));
+}
 function officialMatches(row: UploadRow, items: OfficialItem[]) {
   const keyword = compact(row.keyword || "");
   const companies = [...[row.supplier, row.manufacturer].map(companyCore).filter((v) => v.length >= 3), ...(keyword.length >= 2 ? [companyCore(keyword)] : [])];
   const products = [...[row.product].map(compact).filter((v) => v.length >= 4), ...(keyword.length >= 3 ? [keyword] : [])];
   const brands = [...[row.brand].map(compact).filter((v) => v.length >= 3), ...(keyword.length >= 2 ? [keyword] : [])];
-  return items.flatMap((item) => {
+  return items.reduce<OfficialMatch[]>((matches, item) => {
     const itemCompanies = [item.company, item.manufacturer || ""].map(companyCore).filter(nonEmpty);
     const itemProducts = [item.product].map(compact).filter(nonEmpty);
     const itemBrands = [item.brand || ""].map(compact).filter(nonEmpty);
     const companyHit = companies.some((name) => itemCompanies.some((candidate) => candidate === name));
     const productHit = products.some((name) => itemProducts.some((candidate) => strongProductMatch(name, candidate) || (keyword.length >= 3 && (candidate.includes(keyword) || keyword.includes(candidate)))));
     const brandHit = brands.some((name) => itemBrands.some((candidate) => candidate === name || (keyword.length >= 3 && candidate.includes(keyword))));
-    if (companyHit) return [{ item, basis: productHit || brandHit ? "業者名稱及產品／品牌相符" : "業者名稱相符（可能是該業者的其他產品）" }];
-    if (productHit) return [{ item, basis: brandHit ? "產品名稱及品牌相符" : "產品名稱高度相符（請確認業者）" }];
-    return [];
-  }).slice(0, 5);
+    if (companyHit && productHit) matches.push({ item, relation: "sameProduct", basis: "業者名稱及商品名稱均相符；仍須核對批號與規格" });
+    else if (productHit && brandHit) matches.push({ item, relation: "sameProduct", basis: "品牌及商品名稱均相符；仍須核對業者、批號與規格" });
+    else if (companyHit && relatedCategoryMatch(row, item)) matches.push({ item, relation: "relatedCategory", basis: "同一業者，且官方紀錄與清單內容物屬相關品類；建議查驗目前批次" });
+    else if (companyHit) matches.push({ item, relation: "sameParty", basis: brandHit ? "同一業者／品牌，但官方紀錄是其他商品" : "同一業者，但官方紀錄是其他商品" });
+    else if (productHit) matches.push({ item, relation: "sameProduct", basis: "商品名稱高度相符，但業者尚未確認；須人工核對" });
+    return matches;
+  }, []).slice(0, 5);
 }
 function uniqueOfficial(items: OfficialItem[]) {
   return [...new Map(items.map((item) => [`${compact(item.product)}|${companyCore(item.company || item.manufacturer || "")}|${item.date}|${compact(item.reason)}`, item])).values()];
@@ -128,6 +159,7 @@ export default function Home() {
   const [selectedEvidence, setSelectedEvidence] = useState<Evidence | null>(null);
   const [submittingNews, setSubmittingNews] = useState(false);
   const [newsSubmission, setNewsSubmission] = useState<NewsSubmission>({ url: "", note: "" });
+  const [newsSubmitStatus, setNewsSubmitStatus] = useState("");
   const [databaseOpen, setDatabaseOpen] = useState(false);
   const [sourcesOpen, setSourcesOpen] = useState(false);
   const [databaseLoading, setDatabaseLoading] = useState(false);
@@ -135,15 +167,19 @@ export default function Home() {
   const [databaseTab, setDatabaseTab] = useState<DatabaseTab>("official");
   const [databaseQuery, setDatabaseQuery] = useState("");
   const [databaseData, setDatabaseData] = useState<DatabaseData | null>(null);
-  const shown = useMemo(() => filter === "all" ? results : filter === "official" ? results.filter((item) => item.status === "產品紀錄命中" || item.status === "供應商紀錄命中") : results.filter((item) => item.status === filter), [results, filter]);
-  const stats = useMemo(() => ({ total: results.length, official: results.filter((item) => item.status === "產品紀錄命中" || item.status === "供應商紀錄命中").length, news: results.filter((item) => item.status === "新聞疑似命中").length, noHit: results.filter((item) => item.status === "本次未命中").length, insufficient: results.filter((item) => item.status === "資料不足").length }), [results]);
+  const officialStatuses: Status[] = ["同商品紀錄", "相關品類，需加強查證", "同品牌／供應商其他商品"];
+  const shown = useMemo(() => filter === "all" ? results : filter === "official" ? results.filter((item) => officialStatuses.includes(item.status)) : results.filter((item) => item.status === filter), [results, filter]);
+  const stats = useMemo(() => ({ total: results.length, official: results.filter((item) => officialStatuses.includes(item.status)).length, news: results.filter((item) => item.status === "新聞線索").length, noHit: results.filter((item) => item.status === "本次未命中").length, insufficient: results.filter((item) => item.status === "資料不足").length }), [results]);
   const databaseFiltered = useMemo(() => {
     if (!databaseData) return [] as (OfficialItem | ManualNewsItem)[];
     const items: (OfficialItem | ManualNewsItem)[] = databaseTab === "official" ? databaseData.official : databaseTab === "local" ? databaseData.local : databaseTab === "manual" ? databaseData.manual : databaseData.daily;
     const query = compact(databaseQuery);
-    return items.filter((item) => !query || compact("product" in item ? [item.kind, item.product, item.brand, item.company, item.manufacturer, item.authority, item.reason, item.media, item.action].filter(Boolean).join(" ") : [item.title, item.source, item.region, item.note].filter(Boolean).join(" ")).includes(query)).sort((a, b) => b.date.localeCompare(a.date));
+    return items.filter((item) => !query || compact("product" in item ? [item.kind, item.product, item.brand, item.company, item.manufacturer, item.authority, item.reason, item.media, item.action].filter(Boolean).join(" ") : [item.title, item.source, item.region, item.note, ...(item.products || []), ...(item.companies || []), ...(item.brands || []), ...(item.evidence || [])].filter(Boolean).join(" ")).includes(query)).sort((a, b) => b.date.localeCompare(a.date));
   }, [databaseData, databaseQuery, databaseTab]);
-  const today = new Date(); const since = new Date(today); since.setFullYear(today.getFullYear() - 1); const dateLabel = `${since.toISOString().slice(0, 10)} 至 ${today.toISOString().slice(0, 10)}`;
+  const today = new Date();
+  const localDate = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+  const periodStart = `${today.getFullYear() - 1}-01-01`;
+  const dateLabel = `${periodStart} 至 ${localDate(today)}`;
 
   async function readFile(file: File) {
     setError(""); setSourceWarning("");
@@ -166,7 +202,7 @@ export default function Home() {
     setRows(targetRows); setFileName(sourceName); setResults([]); setFilter("all");
     setLoading(true); setError(""); setSourceWarning("");
     try {
-      setProgress("1/3 下載食藥署與地方衛生局一年內官方資料…");
+      setProgress("1/3 下載前一年度 1 月 1 日至今的官方資料…");
       const base = import.meta.env.BASE_URL;
       const [officialResponse, localResponse] = await Promise.all([fetch(`${base}data/official.json`, { cache: "no-store" }), fetch(`${base}data/local-official.json`, { cache: "no-store" })]);
       if (!officialResponse.ok) throw new Error("食藥署資料暫時無法讀取，請稍後重試。");
@@ -184,13 +220,15 @@ export default function Home() {
         if (!query) return { ...row, query, status: "資料不足", count: 0, latest: "—", note: "至少需要產品、品牌、供應商或製造商名稱之一。", evidence: [] };
         const matched = officialMatches(row, officialItems);
         const news = newsMatches(row, newsItems);
-        const officialEvidence = matched.map<Evidence>(({ item, basis }) => ({ kind: item.kind, title: item.product || item.company, date: item.date, source: item.authority, url: item.url, reason: item.reason, basis, recordCompany: item.company || item.manufacturer, recordProduct: item.product, media: item.media, action: item.action }));
-        const newsEvidence = news.map<Evidence>((item) => ({ kind: item.manual ? "人工核准新聞線索" : "新聞搜尋線索", title: item.title, date: item.date, source: [item.source || "Google 新聞", item.region].filter(Boolean).join("／"), url: item.url, basis: `新聞標題明確包含「${newsKey(row)}」及風險事件詞` }));
+        const officialEvidence = matched.map<Evidence>(({ item, basis, relation }) => ({ kind: item.kind, title: item.product || item.company, date: item.date, source: item.authority, url: item.url, reason: item.reason, basis, relation, recordCompany: item.company || item.manufacturer, recordProduct: item.product, media: item.media, action: item.action }));
+        const newsEvidence = news.map<Evidence>((item) => ({ kind: item.manual ? "人工核准新聞線索" : item.parseStatus === "parsed" ? "新聞內文已解析" : "新聞搜尋線索（僅標題）", title: item.title, date: item.date, source: [item.source || "Google 新聞", item.region].filter(Boolean).join("／"), url: item.articleUrl || item.url, basis: newsMatchBasis(row, item), relation: "news", parsedProducts: item.products, parsedCompanies: item.companies, evidenceSentence: newsEvidenceSentence(row, item), parseStatus: item.parseStatus }));
         if (officialEvidence.length) {
-          const productLevel = officialEvidence.some((item) => item.basis.includes("產品名稱") || item.basis.includes("產品／品牌相符"));
-          return { ...row, query, status: productLevel ? "產品紀錄命中" : "供應商紀錄命中", count: officialEvidence.length, latest: officialEvidence.map((item) => item.date).sort().reverse()[0], note: productLevel ? "官方紀錄與產品名稱高度相符，仍請核對包裝與業者。" : "這是同一供應商的違規紀錄，可能是其他產品；不代表本商品本身違規。", evidence: [...officialEvidence, ...newsEvidence] };
+          const relation: Relation = officialEvidence.some((item) => item.relation === "sameProduct") ? "sameProduct" : officialEvidence.some((item) => item.relation === "relatedCategory") ? "relatedCategory" : "sameParty";
+          const status: Status = relation === "sameProduct" ? "同商品紀錄" : relation === "relatedCategory" ? "相關品類，需加強查證" : "同品牌／供應商其他商品";
+          const note = relation === "sameProduct" ? "官方紀錄與商品名稱高度相符，但尚不能確認為同一批號；請核對批號、規格及業者。" : relation === "relatedCategory" ? "同一業者曾有相關原料或品類紀錄；不代表本商品違規，建議索取目前供貨批次檢驗報告。" : "只有品牌或業者相同，官方事件是其他商品；本商品不得因此判定為高風險。";
+          return { ...row, query, status, count: officialEvidence.length, latest: officialEvidence.map((item) => item.date).sort().reverse()[0], note, evidence: [...officialEvidence, ...newsEvidence] };
         }
-        if (newsEvidence.length) return { ...row, query, status: "新聞疑似命中", count: newsEvidence.length, latest: newsEvidence[0].date, note: "新聞僅為查核線索，須開啟原文並核對事件、日期與同一性。", evidence: newsEvidence };
+        if (newsEvidence.length) return { ...row, query, status: "新聞線索", count: newsEvidence.length, latest: newsEvidence[0].date, note: "新聞僅為補充線索，不等同官方違規；須開啟原文並核對事件、日期與同一性。", evidence: newsEvidence };
         return { ...row, query, status: "本次未命中", count: 0, latest: "—", note: "本次官方資料與新聞線索未命中；不代表絕對無違規。誇大不實以主管機關官方資料為主要依據。", evidence: [] };
       });
       setResults(checked);
@@ -205,7 +243,7 @@ export default function Home() {
   async function runKeywordCheck() {
     const value = clean(keyword);
     if (value.length < 2) { setError("請輸入至少 2 個字的產品、品牌或供應商名稱。"); return; }
-    await checkRows([{ product: "", supplier: "", brand: "", manufacturer: "", taxId: "", adUrl: "", claimText: "", keyword: value }], `快速查核：${value}`);
+    await checkRows([{ product: "", contents: "", supplier: "", brand: "", manufacturer: "", taxId: "", adUrl: "", claimText: "", keyword: value }], `快速查核：${value}`);
   }
 
   function useSample() { setRows(SAMPLE_ROWS); setResults([]); setFileName("範例_供應商產品清單.xlsx"); setError(""); setProgress(""); }
@@ -215,21 +253,36 @@ export default function Home() {
     const book = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(book, sheet, "查詢清單"); XLSX.utils.book_append_sheet(book, guide, "填寫說明"); XLSX.writeFile(book, "食品違規查核_免費自動查核範本.xlsx");
   }
   function exportResults() {
-    const sheet = XLSX.utils.json_to_sheet(results.map((item) => ({ "快速查核關鍵字": item.keyword || "", "產品名稱": item.product, "品牌": item.brand, "供應商": item.supplier, "製造商／進口商": item.manufacturer, "統編（選填）": item.taxId, "查核狀態": item.status, "一年內命中筆數": item.count, "最新日期": item.latest, "證據關聯理由": item.evidence.map((e) => e.basis).join("｜"), "官方紀錄產品": item.evidence.map((e) => e.recordProduct || "").filter(Boolean).join("｜"), "官方紀錄業者": item.evidence.map((e) => e.recordCompany || "").filter(Boolean).join("｜"), "處分法條／原因": item.evidence.map((e) => e.reason || "").filter(Boolean).join("｜"), "證據標題": item.evidence.map((e) => e.title).join("｜"), "證據網址": item.evidence.map((e) => e.url).join("｜"), "官方人工搜尋": searchUrl("official", item.query), "新聞人工搜尋": searchUrl("news", item.query), "備註": item.note })));
-    const book = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(book, sheet, "查核結果"); XLSX.writeFile(book, `一年內免費自動查核結果_${new Date().toISOString().slice(0, 10)}.xlsx`);
+    const sheet = XLSX.utils.json_to_sheet(results.map((item) => ({ "快速查核關鍵字": item.keyword || "", "產品名稱": item.product, "品牌": item.brand, "供應商": item.supplier, "製造商／進口商": item.manufacturer, "統編（選填）": item.taxId, "查核狀態": item.status, "查核期間命中筆數": item.count, "最新日期": item.latest, "證據關聯理由": item.evidence.map((e) => e.basis).join("｜"), "官方紀錄產品": item.evidence.map((e) => e.recordProduct || "").filter(Boolean).join("｜"), "官方紀錄業者": item.evidence.map((e) => e.recordCompany || "").filter(Boolean).join("｜"), "處分法條／原因": item.evidence.map((e) => e.reason || "").filter(Boolean).join("｜"), "證據標題": item.evidence.map((e) => e.title).join("｜"), "證據網址": item.evidence.map((e) => e.url).join("｜"), "官方人工搜尋": searchUrl("official", item.query), "新聞人工搜尋": searchUrl("news", item.query), "備註": item.note })));
+    const book = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(book, sheet, "查核結果"); XLSX.writeFile(book, `年度制免費自動查核結果_${localDate(new Date())}.xlsx`);
   }
-  function submitNewsForReview() {
+  function buildNewsIssue() {
     const data = { url: clean(newsSubmission.url), note: clean(newsSubmission.note) };
-    if (!data.url || !data.note) { setError("請貼上新聞網址，並填寫產品、品牌或事件說明。"); return; }
+    if (!data.url || !data.note) throw new Error("請貼上新聞網址，並填寫產品、品牌或事件說明。");
     let parsed: URL;
-    try { parsed = new URL(data.url); if (!/^https?:$/.test(parsed.protocol)) throw new Error(); } catch { setError("請輸入完整的 http 或 https 新聞網址。"); return; }
+    try { parsed = new URL(data.url); if (!/^https?:$/.test(parsed.protocol)) throw new Error(); } catch { throw new Error("請輸入完整的 http 或 https 新聞網址。"); }
     const source = parsed.hostname.replace(/^www\./, "");
     const date = new Date().toISOString().slice(0, 10);
     const title = data.note.split(/\r?\n/).find(Boolean)?.slice(0, 80) || `新聞線索（${source}）`;
-    const safeNote = data.note.replace(/^## /gm, "＃＃ ");
+    const safeNote = data.note.replace(/^## /gm, "＃＃ ").slice(0, 1500);
     const body = [`## 新聞標題`, title, ``, `## 新聞網址`, data.url, ``, `## 發布日期`, date, ``, `## 地區／主管機關`, `待確認`, ``, `## 新聞來源`, source, ``, `## 補充說明`, safeNote, ``, `---`, `系統已由網址自動整理來源及提交日期。管理者確認原文、日期、地區與同一性後，請留言：/收錄`].join("\n");
-    window.open(`${NEW_ISSUE_URL}?title=${encodeURIComponent(`新聞線索：${title}`)}&body=${encodeURIComponent(body)}`, "_blank", "noopener,noreferrer");
-    setNewsSubmission({ url: "", note: "" }); setSubmittingNews(false); setError("");
+    const params = new URLSearchParams({ title: `新聞線索：${title}`, body });
+    return { body, url: `${NEW_ISSUE_URL}?${params.toString()}` };
+  }
+  function submitNewsForReview() {
+    try {
+      const issue = buildNewsIssue();
+      window.open(issue.url, "_blank", "noopener,noreferrer");
+      navigator.clipboard?.writeText(issue.body).then(
+        () => setNewsSubmitStatus("已開啟 GitHub，送審內容也已複製。若 GitHub 顯示 500，請回來按「開啟空白 Issue」後直接貼上。"),
+        () => setNewsSubmitStatus("已開啟 GitHub。若顯示 500，請回來先按「複製送審內容」，再開啟空白 Issue。"),
+      );
+      setError("");
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "無法開啟 GitHub 送審頁面。"); }
+  }
+  async function copyNewsIssue() {
+    try { await navigator.clipboard.writeText(buildNewsIssue().body); setNewsSubmitStatus("送審內容已複製；請開啟空白 Issue，貼上後送出。"); setError(""); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "瀏覽器無法複製內容，請手動複製表單文字。"); }
   }
 
   async function openDatabase() {
@@ -264,7 +317,7 @@ export default function Home() {
 <button className="database-link" onClick={() => setSourcesOpen(true)}>資料來源說明</button>
 <button className="database-link" onClick={openDatabase}>查看已收錄資料</button>
 <div className="period">
-<i />滾動查核期間：{dateLabel}</div>
+<i />年度查核期間：{dateLabel}</div>
 </div>
 </header>
     <section className="hero" id="top">
@@ -273,7 +326,7 @@ export default function Home() {
 <h1>輸入關鍵字或上傳 Excel<br/>
 <em>完成官方與新聞初查</em>
 </h1>
-<p className="lead">輸入產品、品牌或供應商名稱即可單筆查核；大量清單則上傳 Excel。系統以食藥署一年內官方違規資料為主要依據，新聞只作補充線索。</p>
+<p className="lead">輸入產品、品牌或供應商名稱即可單筆查核；大量清單則上傳 Excel。系統查詢前一年度 1 月 1 日至今天的官方違規資料，新聞只作補充線索。</p>
 <div className="source-chips">
 <span>食藥署開放資料</span>
 <span>官方資料優先</span>
@@ -343,6 +396,12 @@ export default function Home() {
 <div className="section-actions">
 <button className="submit-news" onClick={() => setSubmittingNews(true)}>＋ 提交新聞線索</button>{results.length > 0 && <button className="export" onClick={exportResults}>↓ 匯出 Excel 結果</button>}</div>
 </div>
+      <div className="result-legend" aria-label="查核結果分級說明">
+<div className="level-product"><b>同商品紀錄</b><small>商品名稱高度相符，仍須核對批號</small></div>
+<div className="level-related"><b>相關品類</b><small>同業者且原料／品類相關，建議加強查證</small></div>
+<div className="level-party"><b>其他商品</b><small>僅同品牌或供應商，不代表本商品違規</small></div>
+<div className="level-clear"><b>本次未命中</b><small>查核期間內未找到，不等於保證合格</small></div>
+</div>
       <div className="stats five">
 <button className={filter === "all" ? "active" : ""} onClick={() => setFilter("all")}>
 <span>全部</span>
@@ -350,11 +409,11 @@ export default function Home() {
 <small>筆對象</small>
 </button>
 <button className={`danger ${filter === "official" ? "active" : ""}`} onClick={() => setFilter("official")}>
-<span>官方命中</span>
+<span>官方需確認</span>
 <b>{stats.official}</b>
-<small>分產品／供應商</small>
+<small>依關聯程度分級</small>
 </button>
-<button className={`news ${filter === "新聞疑似命中" ? "active" : ""}`} onClick={() => setFilter("新聞疑似命中")}>
+<button className={`news ${filter === "新聞線索" ? "active" : ""}`} onClick={() => setFilter("新聞線索")}>
 <span>新聞線索</span>
 <b>{stats.news}</b>
 <small>補充線索</small>
@@ -374,7 +433,7 @@ export default function Home() {
 <table>
 <thead>
 <tr>
-<th>狀態</th>
+<th>關聯程度</th>
 <th>產品／業者</th>
 <th>自動找到的證據</th>
 <th>人工補查</th>
@@ -420,7 +479,7 @@ export default function Home() {
 <span className="method-icon">i</span>
 <div>
 <strong>必要判讀原則</strong>
-<p>誇大不實以食藥署等主管機關官方資料為主要依據；新聞僅為補充線索。未命中不代表絕對無違規，命中仍須確認是否為同一公司或產品。</p>
+<p>誇大不實以食藥署等主管機關官方資料為主要依據；新聞僅為補充線索。「同商品紀錄」仍須核對批號；同品牌或供應商的其他商品不得直接判定為本商品違規。</p>
 </div>
 </div>
 <div className="law-links">
@@ -431,7 +490,7 @@ export default function Home() {
     </section>
     {submittingNews && <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && setSubmittingNews(false)}>
 <section className="review-modal news-modal simple-news-modal" role="dialog" aria-modal="true">
-<button className="close" onClick={() => setSubmittingNews(false)}>×</button>
+<button className="close" onClick={() => { setSubmittingNews(false); setNewsSubmitStatus(""); }}>×</button>
 <p className="eyebrow">NEWS SUBMISSION</p>
 <h2>提交新聞線索</h2>
 <p className="modal-intro">只要貼上新聞網址並簡單說明產品、品牌或事件。新聞來源與提交日期會自動整理，管理者核准後才納入共用資料庫。</p>
@@ -441,6 +500,7 @@ export default function Home() {
 <label>補充說明<textarea value={newsSubmission.note} onChange={(e) => { setNewsSubmission({ ...newsSubmission, note: e.target.value }); setError(""); }} placeholder="例如：奧利塔就是 Olitalia；2 款橄欖油含礦物油。請寫出產品、品牌、別名或違規事件。"/>
 </label>
 </div>{error && <p className="error modal-error">{error}</p>}<button className="primary analyze" disabled={!newsSubmission.url.trim() || !newsSubmission.note.trim()} onClick={submitNewsForReview}>前往 GitHub 送出審核</button>
+{newsSubmitStatus && <div className="github-fallback"><p>{newsSubmitStatus}</p><div><button onClick={copyNewsIssue}>複製送審內容</button><a href={NEW_ISSUE_URL} target="_blank" rel="noreferrer">開啟空白 Issue ↗</a></div></div>}
 <p className="github-note">需要登入免費 GitHub 帳號。管理者確認原文後，在議題留言「/收錄」，網站就會自動更新。</p>
 </section>
 </div>}
@@ -464,7 +524,7 @@ export default function Home() {
 </button>
 <button className={databaseTab === "local" ? "active" : ""} onClick={() => setDatabaseTab("local")}>
 <strong>{databaseData.local.length.toLocaleString()}</strong>
-<span>六都衛生局紀錄</span>
+<span>地方衛生局官方紀錄</span>
 <small>更新：{displayUpdatedAt(databaseData.localUpdatedAt)}</small>
 </button>
 <button className={databaseTab === "manual" ? "active" : ""} onClick={() => setDatabaseTab("manual")}>
@@ -478,7 +538,7 @@ export default function Home() {
 <small>更新：{displayUpdatedAt(databaseData.dailyUpdatedAt)}</small>
 </button>
 </div>
-{databaseTab === "local" && <div className="local-source-status">{databaseData.localSources.map((source) => <a key={source.city} href={source.datasetUrl} target="_blank" rel="noreferrer"><b>{source.city}</b><span>{source.mode}</span><small className={source.status === "已連線" ? "ok" : ""}>{source.status}｜一年內 {source.recordCount.toLocaleString()} 筆</small></a>)}</div>}
+{databaseTab === "local" && <div className="local-source-status">{databaseData.localSources.map((source) => <a key={source.city} href={source.datasetUrl} target="_blank" rel="noreferrer"><b>{source.city}</b><span>{source.mode}</span><small className={source.status === "已連線" ? "ok" : ""}>{source.status}｜查核期間 {source.recordCount.toLocaleString()} 筆</small></a>)}</div>}
 <div className="database-toolbar">
 <label htmlFor="database-search">搜尋目前資料</label>
 <input id="database-search" value={databaseQuery} onChange={(e) => setDatabaseQuery(e.target.value)} placeholder="輸入商品、品牌、供應商、製造商或新聞關鍵字"/>
@@ -522,11 +582,12 @@ export default function Home() {
 </td>
 <td>
 <strong>{item.title}</strong>
+{databaseTab === "daily" && <div className="news-entities"><span className={`parse-badge ${item.parseStatus === "parsed" ? "parsed" : "title-only"}`}>{item.parseStatus === "parsed" ? "新聞內文已解析" : "僅取得標題"}</span>{item.products?.length ? <small>商品／品牌：{[...(item.products || []), ...(item.brands || [])].join("、")}</small> : null}{item.companies?.length ? <small>來源／相關業者：{item.companies.join("、")}</small> : null}{item.evidence?.[0] ? <small>證據句：{item.evidence[0]}</small> : null}</div>}
 </td>
 <td>
 <span>{item.region || (databaseTab === "daily" ? "新聞搜尋線索" : "未提供")}</span>{item.note && <small>{item.note}</small>}</td>
 <td>
-<a href={item.url} target="_blank" rel="noreferrer">開啟新聞原文 ↗</a>{item.issueUrl && <a href={item.issueUrl} target="_blank" rel="noreferrer">審核紀錄 ↗</a>}</td>
+<a href={item.articleUrl || item.url} target="_blank" rel="noreferrer">開啟新聞原文 ↗</a>{item.issueUrl && <a href={item.issueUrl} target="_blank" rel="noreferrer">審核紀錄 ↗</a>}</td>
 </tr>)}</tbody>
 </table>{databaseFiltered.length === 0 && <div className="database-empty">沒有符合的資料，請換一個關鍵字。</div>}</div>{databaseFiltered.length > 100 && <p className="database-limit">為保持頁面順暢，目前顯示前 100 筆；請輸入關鍵字縮小範圍。</p>}</>}</div>
 </section>}
@@ -560,7 +621,7 @@ export default function Home() {
 </div>
 <div>
 <dt>本站範圍</dt>
-<dd>每天取得資料後，只保留滾動一年內紀錄</dd>
+<dd>每天取得資料後，保留前一年度 1 月 1 日至當天的紀錄</dd>
 </div>
 </dl>
 <a href={ADS_DATASET_URL} target="_blank" rel="noreferrer">開啟政府資料集 6949 ↗</a>
@@ -579,7 +640,7 @@ export default function Home() {
 </div>
 <div>
 <dt>本站範圍</dt>
-<dd>每天取得資料後，只保留滾動一年內紀錄</dd>
+<dd>每天取得資料後，保留前一年度 1 月 1 日至當天的紀錄</dd>
 </div>
 </dl>
 <a href={IMPORTS_DATASET_URL} target="_blank" rel="noreferrer">開啟政府資料集 6133 ↗</a>
@@ -595,6 +656,16 @@ export default function Home() {
 <a href={LOCAL_HEALTH_URL} target="_blank" rel="noreferrer">查看全國地方衛生機關 ↗</a>
 </article>
 <article>
+<span className="source-badge official">官方資料 4</span>
+<h3>食藥署國內衛生局新聞</h3>
+<dl>
+<div><dt>提供單位</dt><dd>各縣市衛生局發布、由食藥署「國內衛生局新聞」集中呈現</dd></div>
+<div><dt>自動收錄</dt><dd>篩選前一年度 1 月 1 日至今，且含不合格、違規、超標、下架、回收、裁罰或異常等事件詞的公告，再讀取內文中的業者、產品、批號與處理方式</dd></div>
+<div><dt>判讀方式</dt><dd>同業者但不同品項只列為品牌／供應商追蹤；只有產品名稱相符時才列為同商品紀錄</dd></div>
+</dl>
+<a href={HEALTH_NEWS_URL} target="_blank" rel="noreferrer">開啟食藥署國內衛生局新聞 ↗</a>
+</article>
+<article>
 <span className="source-badge news">新聞線索</span>
 <h3>Google 新聞每日搜尋</h3>
 <dl>
@@ -608,7 +679,11 @@ export default function Home() {
 </div>
 <div>
 <dt>篩選方式</dt>
-<dd>保留一年內且標題包含違規、裁罰、誇大、下架、不合格、回收、處分、遭罰或開罰等事件詞的新聞</dd>
+<dd>保留前一年度 1 月 1 日至今，且標題包含違規、裁罰、誇大、下架、不合格、回收、處分、遭罰或開罰等事件詞的新聞</dd>
+</div>
+<div>
+<dt>內文解析</dt>
+<dd>能讀取原文時，另存商品、品牌、來源／相關業者及短證據句；遇到網站阻擋或無法讀取時標示「僅取得標題」，不推測缺少內容</dd>
 </div>
 </dl>
 <a href={GOOGLE_NEWS_URL} target="_blank" rel="noreferrer">開啟 Google 新聞 ↗</a>
@@ -638,11 +713,11 @@ export default function Home() {
 <div>
 <span>
 <b>每天約 08:20</b>
-<small>GitHub 自動抓取食藥署、六都衛生局與新聞線索；實際完成時間可能稍有延遲。</small>
+<small>GitHub 自動抓取食藥署中央資料、地方開放資料、國內衛生局官方新聞與一般新聞線索；實際完成時間可能稍有延遲。</small>
 </span>
 <span>
-<b>滾動一年</b>
-<small>查核日期會隨每天更新往前移動，不是固定年度資料。</small>
+<b>年度制查核</b>
+<small>每年查詢前一完整年度 1 月 1 日至當天；例如 2026 年查詢 2025-01-01 至今。</small>
 </span>
 <span>
 <b>名稱自動比對</b>
@@ -672,7 +747,7 @@ export default function Home() {
 <h2>{selectedEvidence.kind.includes("新聞") ? "新聞線索詳情" : "官方原始紀錄摘要"}</h2>
 <div className="relation-box">
 <strong>為什麼與清單有關？</strong>
-<p>{selectedEvidence.basis}</p>{selectedEvidence.basis.includes("其他產品") && <small>這只證明該供應商一年內有違規紀錄，不代表您清單中的商品本身違規。</small>}</div>
+<p>{selectedEvidence.basis}</p>{selectedEvidence.relation === "sameParty" && <small>這只證明該品牌或供應商在查核期間有其他商品紀錄，不代表您清單中的商品本身違規。</small>}{selectedEvidence.relation === "relatedCategory" && <small>品類相關僅代表需要加強查證，不能直接認定目前商品不合格。</small>}</div>
 <dl className="evidence-detail">
 <div>
 <dt>{selectedEvidence.kind.includes("新聞") ? "新聞標題" : "官方紀錄產品"}</dt>
@@ -680,7 +755,16 @@ export default function Home() {
 </div>{selectedEvidence.recordCompany && <div>
 <dt>官方紀錄業者</dt>
 <dd>{selectedEvidence.recordCompany}</dd>
-</div>}<div>
+</div>}{selectedEvidence.parsedProducts?.length ? <div>
+<dt>內文解析商品／品牌</dt>
+<dd>{selectedEvidence.parsedProducts.join("、")}</dd>
+</div> : null}{selectedEvidence.parsedCompanies?.length ? <div>
+<dt>內文解析來源／相關業者</dt>
+<dd>{selectedEvidence.parsedCompanies.join("、")}</dd>
+</div> : null}{selectedEvidence.evidenceSentence ? <div>
+<dt>新聞證據句</dt>
+<dd>{selectedEvidence.evidenceSentence}</dd>
+</div> : null}<div>
 <dt>日期</dt>
 <dd>{selectedEvidence.date}</dd>
 </div>

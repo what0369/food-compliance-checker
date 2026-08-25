@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import * as XLSX from "xlsx";
 
 type UploadRow = { product: string; contents: string; supplier: string; brand: string; manufacturer: string; taxId: string; adUrl: string; claimText: string; keyword?: string };
@@ -9,11 +9,15 @@ type Relation = "sameProduct" | "relatedCategory" | "sameParty" | "news";
 type Evidence = { kind: string; title: string; date: string; source: string; url: string; basis: string; relation: Relation; reason?: string; recordCompany?: string; recordProduct?: string; media?: string; action?: string; parsedProducts?: string[]; parsedCompanies?: string[]; evidenceSentence?: string; parseStatus?: "parsed" | "titleOnly" };
 type OfficialMatch = { item: OfficialItem; relation: Exclude<Relation, "news">; basis: string };
 type Result = UploadRow & { status: Status; count: number; latest: string; note: string; query: string; evidence: Evidence[] };
-type OfficialItem = { kind: string; product: string; company: string; date: string; authority: string; reason: string; url: string; manufacturer?: string; brand?: string; media?: string; action?: string; city?: string; sourceLayer?: string; matchable?: boolean; parseStatus?: string };
+type OfficialItem = { kind: string; product: string; company: string; date: string; authority: string; reason: string; url: string; manufacturer?: string; brand?: string; media?: string; action?: string; city?: string; sourceLayer?: string; matchable?: boolean; parseStatus?: string; correctionIssueUrl?: string; correctionNote?: string; correctionApprovedAt?: string };
 type LocalSource = { city: string; datasetUrl: string; mode: string; status: string; recordCount: number; message?: string };
-type NewsItem = { title: string; url: string; articleUrl?: string; date: string; source: string; region?: string; manual?: boolean; products?: string[]; companies?: string[]; brands?: string[]; evidence?: string[]; parseStatus?: "parsed" | "titleOnly"; parseMessage?: string };
+type NewsItem = { title: string; url: string; articleUrl?: string; date: string; source: string; region?: string; manual?: boolean; products?: string[]; companies?: string[]; brands?: string[]; evidence?: string[]; parseStatus?: "parsed" | "titleOnly"; parseMessage?: string; correctionIssueUrl?: string; correctionNote?: string; correctionApprovedAt?: string; originalParsedEntities?: { products?: string[]; companies?: string[]; brands?: string[]; evidence?: string[] } };
 type ManualNewsItem = NewsItem & { note?: string; approvedAt?: string; issueUrl?: string };
 type NewsSubmission = { url: string; note: string };
+type LocalCorrectionSubmission = { product: string; company: string; manufacturer: string; reason: string };
+type NewsCorrectionSubmission = { products: string; brands: string; companies: string; evidence: string; reason: string };
+type ReviewKind = "news" | "correction" | "newsCorrection";
+type GitHubReviewIssue = { number: number; title: string; body: string | null; html_url: string; created_at: string; user?: { login?: string }; pull_request?: unknown };
 type DatabaseTab = "official" | "local" | "manual" | "daily";
 type DatabaseData = { official: OfficialItem[]; local: OfficialItem[]; localRawCount: number; localRetryCount: number; localNoEvidenceCount: number; localSources: LocalSource[]; manual: ManualNewsItem[]; daily: NewsItem[]; officialUpdatedAt: string; localUpdatedAt: string; manualUpdatedAt: string; dailyUpdatedAt: string };
 
@@ -26,6 +30,10 @@ const LOCAL_HEALTH_URL = "https://service.mohw.gov.tw/HealthCenter/";
 const HEALTH_NEWS_URL = "https://www.fda.gov.tw/tc/csmnews.aspx";
 const NEW_ISSUE_URL = "https://github.com/what0369/food-compliance-checker/issues/new";
 const ISSUES_URL = "https://github.com/what0369/food-compliance-checker/issues";
+const ADMIN_HASH = "#/admin-review";
+const GITHUB_OWNER = "what0369";
+const GITHUB_REPO = "food-compliance-checker";
+const GITHUB_TOKEN_URL = "https://github.com/settings/personal-access-tokens/new";
 const STORAGE_KEY = "food-compliance-free-check-v6";
 const VERSION_LABEL = `v${__APP_VERSION__}`;
 const BUILD_LABEL = __BUILD_ID__ === "local" ? "本機預覽" : __BUILD_ID__;
@@ -116,8 +124,9 @@ function searchUrl(kind: "official" | "news", query: string) {
   if (kind === "news") return `https://news.google.com/search?q=${encodeURIComponent(`${exact} 違規 OR 裁罰 OR 誇大廣告`)}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant`;
   return `https://www.google.com/search?q=${encodeURIComponent(`site:fda.gov.tw OR site:gov.tw ${exact} 違規 裁罰 食品`)}`;
 }
-function localCorrectionIssueUrl(item: OfficialItem) {
+function buildLocalCorrectionIssue(item: OfficialItem, correction: LocalCorrectionSubmission) {
   const shown = (value?: string) => clean(value) || "未提供";
+  const safeReason = clean(correction.reason).replace(/^## /gm, "＃＃ ").slice(0, 1500);
   const body = [
     "## 官方來源", item.url,
     "", "## 目前網站資料",
@@ -127,16 +136,48 @@ function localCorrectionIssueUrl(item: OfficialItem) {
     `- 製造商：${shown(item.manufacturer)}`,
     `- 主管機關：${shown(item.authority)}`,
     "", "## 請填寫正確內容",
-    "- 商品：",
-    "- 業者：",
-    "- 製造商：",
+    `- 商品：${clean(correction.product)}`,
+    `- 業者：${clean(correction.company)}`,
+    `- 製造商：${clean(correction.manufacturer)}`,
     "", "## 修正理由或原文位置",
-    "請說明哪一段被多抓、漏抓或欄位放錯。",
+    safeReason,
     "", "---",
-    "管理者會核對官方來源後，調整解析規則或新增人工例外；不直接覆寫官方原始資料。",
+    "管理者核對官方來源後，在本 Issue 留言「/套用修正」即可核准；系統會保存人工修正，不直接覆寫官方原始資料。",
   ].join("\n");
   const titleName = clean(item.product || item.company).slice(0, 45) || "地方衛生局紀錄";
-  return `${NEW_ISSUE_URL}?${new URLSearchParams({ title: `資料欄位修正：${titleName}`, body }).toString()}`;
+  return { body, url: `${NEW_ISSUE_URL}?${new URLSearchParams({ title: `資料欄位修正：${titleName}`, body }).toString()}` };
+}
+
+function issueList(value: string) {
+  return value.split(/\r?\n/).map(clean).filter(Boolean).join("｜");
+}
+
+function buildNewsCorrectionIssue(item: NewsItem, correction: NewsCorrectionSubmission) {
+  const shown = (values?: string[]) => values?.length ? values.join("｜") : "未提供";
+  const safeReason = clean(correction.reason).replace(/^## /gm, "＃＃ ").slice(0, 1500);
+  const body = [
+    "## 新聞來源資料",
+    `- 日期：${item.date}`,
+    `- 標題：${clean(item.title)}`,
+    `- 新聞網址：${item.url}`,
+    `- 原文網址：${item.articleUrl || item.url}`,
+    "", "## 目前解析結果",
+    `- 商品／產品：${shown(item.products)}`,
+    `- 品牌：${shown(item.brands)}`,
+    `- 相關業者：${shown(item.companies)}`,
+    `- 證據句：${shown(item.evidence)}`,
+    "", "## 請填寫正確內容",
+    `- 商品／產品：${issueList(correction.products)}`,
+    `- 品牌：${issueList(correction.brands)}`,
+    `- 相關業者：${issueList(correction.companies)}`,
+    `- 證據句：${issueList(correction.evidence)}`,
+    "", "## 修正理由或原文位置",
+    safeReason,
+    "", "---",
+    "管理者核對新聞原文後，在本 Issue 留言「/套用新聞修正」即可核准；系統保留原始解析結果並於每日更新後重新套用修正。",
+  ].join("\n");
+  const titleName = clean(item.title).replace(/\s+-\s+[^-]+$/, "").slice(0, 55) || "每日新聞線索";
+  return { body, url: `${NEW_ISSUE_URL}?${new URLSearchParams({ title: `新聞解析修正：${titleName}`, body }).toString()}` };
 }
 function strongProductMatch(left: string, right: string) {
   if (!left || !right) return false;
@@ -195,8 +236,24 @@ export default function Home() {
   const [submittingNews, setSubmittingNews] = useState(false);
   const [newsSubmission, setNewsSubmission] = useState<NewsSubmission>({ url: "", note: "" });
   const [newsSubmitStatus, setNewsSubmitStatus] = useState("");
+  const [correctionItem, setCorrectionItem] = useState<OfficialItem | null>(null);
+  const [correctionForm, setCorrectionForm] = useState<LocalCorrectionSubmission>({ product: "", company: "", manufacturer: "", reason: "" });
+  const [correctionSubmitStatus, setCorrectionSubmitStatus] = useState("");
+  const [correctionError, setCorrectionError] = useState("");
+  const [newsCorrectionItem, setNewsCorrectionItem] = useState<NewsItem | null>(null);
+  const [newsCorrectionForm, setNewsCorrectionForm] = useState<NewsCorrectionSubmission>({ products: "", brands: "", companies: "", evidence: "", reason: "" });
+  const [newsCorrectionSubmitStatus, setNewsCorrectionSubmitStatus] = useState("");
+  const [newsCorrectionError, setNewsCorrectionError] = useState("");
   const [databaseOpen, setDatabaseOpen] = useState(false);
   const [sourcesOpen, setSourcesOpen] = useState(false);
+  const [adminOpen, setAdminOpen] = useState(() => window.location.hash === ADMIN_HASH);
+  const [adminToken, setAdminToken] = useState("");
+  const [adminUser, setAdminUser] = useState("");
+  const [adminIssues, setAdminIssues] = useState<GitHubReviewIssue[]>([]);
+  const [selectedIssue, setSelectedIssue] = useState<number | null>(null);
+  const [adminLoading, setAdminLoading] = useState(false);
+  const [adminError, setAdminError] = useState("");
+  const [adminStatus, setAdminStatus] = useState("");
   const [databaseLoading, setDatabaseLoading] = useState(false);
   const [databaseError, setDatabaseError] = useState("");
   const [databaseTab, setDatabaseTab] = useState<DatabaseTab>("official");
@@ -215,6 +272,115 @@ export default function Home() {
   const localDate = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
   const periodStart = `${today.getFullYear() - 1}-01-01`;
   const dateLabel = `${periodStart} 至 ${localDate(today)}`;
+
+  useEffect(() => {
+    const syncAdminPage = () => {
+      const isAdminPage = window.location.hash === ADMIN_HASH;
+      setAdminOpen(isAdminPage);
+      if (!isAdminPage) {
+        setAdminToken("");
+        setAdminUser("");
+        setAdminIssues([]);
+        setSelectedIssue(null);
+        setAdminError("");
+        setAdminStatus("");
+      }
+    };
+    window.addEventListener("hashchange", syncAdminPage);
+    return () => window.removeEventListener("hashchange", syncAdminPage);
+  }, []);
+
+  function openAdmin() {
+    window.location.hash = "/admin-review";
+    setAdminOpen(true);
+  }
+
+  function closeAdmin() {
+    window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}#top`);
+    setAdminOpen(false);
+    setAdminToken("");
+    setAdminUser("");
+    setAdminIssues([]);
+    setSelectedIssue(null);
+    setAdminError("");
+    setAdminStatus("");
+  }
+
+  function reviewKind(issue: GitHubReviewIssue): ReviewKind | null {
+    if (issue.title.startsWith("新聞線索：")) return "news";
+    if (issue.title.startsWith("資料欄位修正：")) return "correction";
+    if (issue.title.startsWith("新聞解析修正：")) return "newsCorrection";
+    return null;
+  }
+
+  function reviewCommand(issue: GitHubReviewIssue) {
+    const kind = reviewKind(issue);
+    if (kind === "correction") return "/套用修正";
+    if (kind === "newsCorrection") return "/套用新聞修正";
+    return "/收錄";
+  }
+
+  function issueSourceUrl(issue: GitHubReviewIssue) {
+    return issue.body?.match(/https?:\/\/[^\s)]+/)?.[0] || issue.html_url;
+  }
+
+  async function githubRequest(path: string, token: string, init: RequestInit = {}) {
+    return fetch(`https://api.github.com${path}`, {
+      ...init,
+      headers: {
+        Accept: "application/vnd.github+json",
+        Authorization: `Bearer ${token}`,
+        "X-GitHub-Api-Version": "2022-11-28",
+        ...(init.headers || {}),
+      },
+    });
+  }
+
+  async function loadAdminIssues(token = adminToken) {
+    const response = await githubRequest(`/repos/${GITHUB_OWNER}/${GITHUB_REPO}/issues?state=open&per_page=100&sort=created&direction=desc`, token);
+    if (!response.ok) throw new Error(response.status === 401 ? "GitHub 憑證無效或已過期。" : "目前無法讀取待審核清單，請稍後再試。");
+    const items = await response.json() as GitHubReviewIssue[];
+    setAdminIssues(items.filter((issue) => !issue.pull_request && reviewKind(issue)));
+  }
+
+  async function signInAdmin() {
+    const token = adminToken.trim();
+    if (!token) { setAdminError("請先輸入 GitHub 存取憑證。"); return; }
+    setAdminLoading(true); setAdminError(""); setAdminStatus("");
+    try {
+      const response = await githubRequest("/user", token);
+      if (!response.ok) throw new Error("GitHub 憑證無效或已過期。");
+      const user = await response.json() as { login?: string };
+      if (user.login?.toLowerCase() !== GITHUB_OWNER) throw new Error(`此管理頁只接受 ${GITHUB_OWNER} 帳號。`);
+      await loadAdminIssues(token);
+      setAdminUser(user.login);
+      setAdminStatus("身分驗證完成。請核對原始來源後，勾選一件案件核准。");
+    } catch (cause) { setAdminError(cause instanceof Error ? cause.message : "管理者登入失敗。"); }
+    finally { setAdminLoading(false); }
+  }
+
+  async function approveSelectedIssue() {
+    const issue = adminIssues.find((item) => item.number === selectedIssue);
+    if (!issue) { setAdminError("請先勾選一件待審核案件。"); return; }
+    const kind = reviewKind(issue);
+    const kindLabel = kind === "correction" ? "欄位修正" : kind === "newsCorrection" ? "新聞解析修正" : "新聞線索";
+    if (!window.confirm(`確定已核對原始來源，並核准這筆${kindLabel}嗎？\n\n#${issue.number} ${issue.title}`)) return;
+    setAdminLoading(true); setAdminError(""); setAdminStatus("");
+    try {
+      const response = await githubRequest(`/repos/${GITHUB_OWNER}/${GITHUB_REPO}/issues/${issue.number}/comments`, adminToken.trim(), {
+        method: "POST",
+        body: JSON.stringify({ body: reviewCommand(issue) }),
+      });
+      if (!response.ok) {
+        if (response.status === 403) throw new Error("這個憑證沒有 Issues 讀寫權限，請依下方說明重新建立。");
+        throw new Error("核准指令送出失敗，請稍後再試。");
+      }
+      setAdminIssues((items) => items.filter((item) => item.number !== issue.number));
+      setSelectedIssue(null);
+      setAdminStatus(`已核准 #${issue.number}；GitHub 正在更新資料庫並重新發布網站，通常需要 1～3 分鐘。`);
+    } catch (cause) { setAdminError(cause instanceof Error ? cause.message : "核准失敗。"); }
+    finally { setAdminLoading(false); }
+  }
 
   async function readFile(file: File) {
     setError(""); setSourceWarning("");
@@ -320,6 +486,90 @@ export default function Home() {
     catch (cause) { setError(cause instanceof Error ? cause.message : "瀏覽器無法複製內容，請手動複製表單文字。"); }
   }
 
+  function openCorrectionForm(item: OfficialItem) {
+    setCorrectionItem(item);
+    setCorrectionForm({ product: "", company: "", manufacturer: "", reason: "" });
+    setCorrectionSubmitStatus("");
+    setCorrectionError("");
+  }
+
+  function closeCorrectionForm() {
+    setCorrectionItem(null);
+    setCorrectionForm({ product: "", company: "", manufacturer: "", reason: "" });
+    setCorrectionSubmitStatus("");
+    setCorrectionError("");
+  }
+
+  function correctionIssue() {
+    if (!correctionItem) throw new Error("找不到要修改的資料，請關閉後重試。");
+    const fields = [
+      { value: clean(correctionForm.product), current: clean(correctionItem.product) },
+      { value: clean(correctionForm.company), current: clean(correctionItem.company) },
+      { value: clean(correctionForm.manufacturer), current: clean(correctionItem.manufacturer) },
+    ];
+    const clearWords = new Set(["刪除", "清除", "留空", "未提供", "無"]);
+    const hasChange = fields.some(({ value, current }) => value && (clearWords.has(value) || value !== current));
+    if (!hasChange) throw new Error("請至少填寫一個與目前資料不同的正確欄位；要移除錯誤內容可輸入「清除」。");
+    if (!clean(correctionForm.reason)) throw new Error("請填寫修改理由或原文位置，方便管理者核對。");
+    return buildLocalCorrectionIssue(correctionItem, correctionForm);
+  }
+
+  function submitCorrectionForReview() {
+    try {
+      const issue = correctionIssue();
+      window.open(issue.url, "_blank", "noopener,noreferrer");
+      navigator.clipboard?.writeText(issue.body).then(
+        () => setCorrectionSubmitStatus("已開啟 GitHub，送審內容也已複製。請確認內容後按 Submit new issue。"),
+        () => setCorrectionSubmitStatus("已開啟 GitHub。請確認內容後按 Submit new issue。"),
+      );
+      setCorrectionError("");
+    } catch (cause) { setCorrectionError(cause instanceof Error ? cause.message : "無法建立修正案件。"); }
+  }
+
+  async function copyCorrectionIssue() {
+    try { await navigator.clipboard.writeText(correctionIssue().body); setCorrectionSubmitStatus("送審內容已複製；請開啟空白 Issue，貼上後送出。"); setCorrectionError(""); }
+    catch (cause) { setCorrectionError(cause instanceof Error ? cause.message : "瀏覽器無法複製內容，請手動複製表單文字。"); }
+  }
+
+  function openNewsCorrectionForm(item: NewsItem) {
+    setNewsCorrectionItem(item);
+    setNewsCorrectionForm({ products: "", brands: "", companies: "", evidence: "", reason: "" });
+    setNewsCorrectionSubmitStatus("");
+    setNewsCorrectionError("");
+  }
+
+  function closeNewsCorrectionForm() {
+    setNewsCorrectionItem(null);
+    setNewsCorrectionForm({ products: "", brands: "", companies: "", evidence: "", reason: "" });
+    setNewsCorrectionSubmitStatus("");
+    setNewsCorrectionError("");
+  }
+
+  function newsCorrectionIssue() {
+    if (!newsCorrectionItem) throw new Error("找不到要修改的新聞，請關閉後重試。");
+    const fields = [newsCorrectionForm.products, newsCorrectionForm.brands, newsCorrectionForm.companies, newsCorrectionForm.evidence].map(clean);
+    if (!fields.some(Boolean)) throw new Error("請至少填寫一項正確的商品、品牌、相關業者或證據句；要移除全部內容可輸入「清除」。");
+    if (!clean(newsCorrectionForm.reason)) throw new Error("請填寫修改理由或原文位置，方便管理者核對。");
+    return buildNewsCorrectionIssue(newsCorrectionItem, newsCorrectionForm);
+  }
+
+  function submitNewsCorrectionForReview() {
+    try {
+      const issue = newsCorrectionIssue();
+      window.open(issue.url, "_blank", "noopener,noreferrer");
+      navigator.clipboard?.writeText(issue.body).then(
+        () => setNewsCorrectionSubmitStatus("已開啟 GitHub，送審內容也已複製。請確認內容後按 Submit new issue。"),
+        () => setNewsCorrectionSubmitStatus("已開啟 GitHub。請確認內容後按 Submit new issue。"),
+      );
+      setNewsCorrectionError("");
+    } catch (cause) { setNewsCorrectionError(cause instanceof Error ? cause.message : "無法建立新聞解析修正案件。"); }
+  }
+
+  async function copyNewsCorrectionIssue() {
+    try { await navigator.clipboard.writeText(newsCorrectionIssue().body); setNewsCorrectionSubmitStatus("送審內容已複製；請開啟空白 Issue，貼上後送出。"); setNewsCorrectionError(""); }
+    catch (cause) { setNewsCorrectionError(cause instanceof Error ? cause.message : "瀏覽器無法複製內容，請手動複製表單文字。"); }
+  }
+
   async function openDatabase() {
     setDatabaseOpen(true); setDatabaseError("");
     if (databaseData || databaseLoading) return;
@@ -351,6 +601,7 @@ export default function Home() {
 </div>
 </a>
 <div className="top-actions">
+<button className="database-link admin-entry" onClick={openAdmin}>管理審核</button>
 <button className="database-link" onClick={() => setSourcesOpen(true)}>資料來源說明</button>
 <button className="database-link" onClick={openDatabase}>查看已收錄資料</button>
 <div className="period">
@@ -541,6 +792,61 @@ export default function Home() {
 <p className="github-note">需要登入免費 GitHub 帳號。管理者確認原文後，在議題留言「/收錄」，網站就會自動更新。</p>
 </section>
 </div>}
+    {correctionItem && <div className="modal-backdrop correction-modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && closeCorrectionForm()}>
+<section className="review-modal correction-modal" role="dialog" aria-modal="true" aria-label="提出欄位修正">
+<button className="close" onClick={closeCorrectionForm}>×</button>
+<p className="eyebrow">CORRECTION REQUEST</p>
+<h2>提出欄位修正</h2>
+<p className="modal-intro">目前資料已自動帶入。只填需要修改的正確欄位；沒有要改的欄位請保持空白。</p>
+<div className="correction-current">
+<div><span>目前商品</span><strong>{correctionItem.product || "未提供"}</strong></div>
+<div><span>目前業者</span><strong>{correctionItem.company || "未提供"}</strong></div>
+<div><span>目前製造商</span><strong>{correctionItem.manufacturer || "未提供"}</strong></div>
+<div><span>主管機關／日期</span><strong>{[correctionItem.authority, correctionItem.date].filter(Boolean).join("｜") || "未提供"}</strong></div>
+</div>
+<a className="correction-source" href={correctionItem.url} target="_blank" rel="noreferrer">先開啟官方來源核對 ↗</a>
+<div className="correction-form">
+<label>正確商品名稱（不修改請留空）<input value={correctionForm.product} onChange={(event) => { setCorrectionForm({ ...correctionForm, product: event.target.value }); setCorrectionError(""); }} placeholder="輸入正確商品；要移除錯誤內容請填「清除」"/></label>
+<label>正確業者名稱（不修改請留空）<input value={correctionForm.company} onChange={(event) => { setCorrectionForm({ ...correctionForm, company: event.target.value }); setCorrectionError(""); }} placeholder="輸入正確業者；要移除錯誤內容請填「清除」"/></label>
+<label>正確製造商（不修改請留空）<input value={correctionForm.manufacturer} onChange={(event) => { setCorrectionForm({ ...correctionForm, manufacturer: event.target.value }); setCorrectionError(""); }} placeholder="輸入正確製造商；要移除錯誤內容請填「清除」"/></label>
+<label>修改理由或原文位置<textarea value={correctionForm.reason} onChange={(event) => { setCorrectionForm({ ...correctionForm, reason: event.target.value }); setCorrectionError(""); }} placeholder="例如：公告第二段的業者是受託製造商，不是產品販售業者。"/></label>
+</div>
+{correctionError && <p className="error modal-error">{correctionError}</p>}
+<button className="primary" onClick={submitCorrectionForReview}>前往 GitHub 送出審核</button>
+{correctionSubmitStatus && <div className="github-fallback"><p>{correctionSubmitStatus}</p><div><button onClick={copyCorrectionIssue}>複製送審內容</button><a href={NEW_ISSUE_URL} target="_blank" rel="noreferrer">開啟空白 Issue ↗</a></div></div>}
+<p className="github-note">提出者只需登入免費 GitHub 帳號並按 Submit new issue；不需要管理者憑證。核准與資料更新由管理者另外處理。</p>
+</section>
+</div>}
+    {newsCorrectionItem && <div className="modal-backdrop correction-modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && closeNewsCorrectionForm()}>
+<section className="review-modal correction-modal news-correction-modal" role="dialog" aria-modal="true" aria-label="回報新聞解析修正">
+<button className="close" onClick={closeNewsCorrectionForm}>×</button>
+<p className="eyebrow">NEWS PARSING CORRECTION</p>
+<h2>回報新聞解析修正</h2>
+<p className="modal-intro">請先核對新聞原文，再填寫需要修改的欄位。每個名稱或證據句請一行一項；沒有要改的欄位請保持空白。</p>
+<div className="news-correction-source">
+<span>{newsCorrectionItem.date}｜{newsCorrectionItem.source}</span>
+<strong>{newsCorrectionItem.title}</strong>
+<a href={newsCorrectionItem.articleUrl || newsCorrectionItem.url} target="_blank" rel="noreferrer">先開啟新聞原文核對 ↗</a>
+</div>
+<div className="news-current-entities">
+<div><span>目前商品／產品</span><p>{newsCorrectionItem.products?.join("、") || "未提供"}</p></div>
+<div><span>目前品牌</span><p>{newsCorrectionItem.brands?.join("、") || "未提供"}</p></div>
+<div><span>目前相關業者</span><p>{newsCorrectionItem.companies?.join("、") || "未提供"}</p></div>
+<div><span>目前證據句</span><p>{newsCorrectionItem.evidence?.join("／") || "未提供"}</p></div>
+</div>
+<div className="correction-form news-correction-form">
+<label>正確商品／產品（每行一項）<textarea value={newsCorrectionForm.products} onChange={(event) => { setNewsCorrectionForm({ ...newsCorrectionForm, products: event.target.value }); setNewsCorrectionError(""); }} placeholder={'例如：\n協億苦茶油\n冷壓苦茶油'} /></label>
+<label>正確品牌（每行一項）<textarea value={newsCorrectionForm.brands} onChange={(event) => { setNewsCorrectionForm({ ...newsCorrectionForm, brands: event.target.value }); setNewsCorrectionError(""); }} placeholder={'例如：\n協億'} /></label>
+<label>正確相關業者（每行一項）<textarea value={newsCorrectionForm.companies} onChange={(event) => { setNewsCorrectionForm({ ...newsCorrectionForm, companies: event.target.value }); setNewsCorrectionError(""); }} placeholder={'例如：\n協億有限公司\n要移除全部內容請填「清除」'} /></label>
+<label>正確證據句（每行一項）<textarea value={newsCorrectionForm.evidence} onChange={(event) => { setNewsCorrectionForm({ ...newsCorrectionForm, evidence: event.target.value }); setNewsCorrectionError(""); }} placeholder="請貼上原文中能直接支持產品、業者及事件的短句" /></label>
+<label>修改理由或原文位置<textarea value={newsCorrectionForm.reason} onChange={(event) => { setNewsCorrectionForm({ ...newsCorrectionForm, reason: event.target.value }); setNewsCorrectionError(""); }} placeholder="例如：原文第三段提到協億是產品製造商；目前系統誤抓到彰化縣衛生局。" /></label>
+</div>
+{newsCorrectionError && <p className="error modal-error">{newsCorrectionError}</p>}
+<button className="primary" onClick={submitNewsCorrectionForReview}>前往 GitHub 送出審核</button>
+{newsCorrectionSubmitStatus && <div className="github-fallback"><p>{newsCorrectionSubmitStatus}</p><div><button onClick={copyNewsCorrectionIssue}>複製送審內容</button><a href={NEW_ISSUE_URL} target="_blank" rel="noreferrer">開啟空白 Issue ↗</a></div></div>}
+<p className="github-note">提出者不需要管理者憑證。管理者核准後，人工修正會在每日新聞更新後重新套用，原始解析結果仍保留。</p>
+</section>
+</div>}
     {databaseOpen && <section className="database-page" role="dialog" aria-modal="true" aria-label="已收錄資料">
 <header>
 <div>
@@ -581,8 +887,9 @@ export default function Home() {
 <div><span>待重試</span><strong>{databaseData.localRetryCount.toLocaleString()}</strong><small>公告正文或 PDF 暫時解析失敗</small></div>
 <p>原始收錄 {databaseData.localRawCount.toLocaleString()}／可查核 {databaseData.local.length.toLocaleString()}／待重試 {databaseData.localRetryCount.toLocaleString()}。另有 {databaseData.localNoEvidenceCount.toLocaleString()} 筆已解析但未發現違規證據，因此不列入自動查核。</p>
 </div>}
-{databaseTab === "local" && <div className="local-source-status">{databaseData.localSources.map((source) => <a key={source.city} href={source.datasetUrl} target="_blank" rel="noreferrer"><b>{source.city}</b><span>{source.mode}</span><small className={source.status === "已連線" ? "ok" : ""}>{source.status}｜查核期間 {source.recordCount.toLocaleString()} 筆</small></a>)}</div>}
-{databaseTab === "local" && <div className="local-correction-note"><b>業者或製造商抓取錯誤？</b><span>請在該筆紀錄按「回報欄位修正」，填入正確內容。管理者核對官方來源後會調整解析規則或新增人工例外，原始資料仍保留不覆寫。</span></div>}
+{databaseTab === "local" && <div className="local-source-status">{databaseData.localSources.map((source) => <a key={source.city} href={source.datasetUrl} target="_blank" rel="noreferrer"><b>{source.city}</b><span>{source.mode}</span><small className={source.status.startsWith("已") ? "ok" : ""}>{source.status}｜查核期間 {source.recordCount.toLocaleString()} 筆</small></a>)}</div>}
+{databaseTab === "local" && <div className="local-correction-note"><b>業者或製造商抓取錯誤？</b><span>請在該筆紀錄按「提出欄位修正」，填入正確內容。管理者核對官方來源後，在管理審核頁勾選核准即可重新發布；原始資料仍保留不覆寫。</span></div>}
+{databaseTab === "daily" && <div className="local-correction-note"><b>新聞解析內容抓錯？</b><span>請在該篇新聞按「回報新聞解析修正」，修正商品、品牌、相關業者或證據句。人工核准後會在每日更新後重新套用，原始解析結果仍保留。</span></div>}
 <div className="database-toolbar">
 <label htmlFor="database-search">搜尋目前資料</label>
 <input id="database-search" value={databaseQuery} onChange={(e) => setDatabaseQuery(e.target.value)} placeholder="輸入商品、品牌、供應商、製造商或新聞關鍵字"/>
@@ -610,7 +917,7 @@ export default function Home() {
 <td>
 <strong>{item.product || "未提供"}</strong>{item.brand && <small>品牌：{item.brand}</small>}</td>
 <td>
-<strong>{item.company || "未提供"}</strong>{item.manufacturer && <small>製造商：{item.manufacturer}</small>}</td>
+<strong>{item.company || "未提供"}</strong>{item.manufacturer && <small>製造商：{item.manufacturer}</small>}{item.correctionIssueUrl && <small className="correction-badge">✓ 人工核准修正</small>}</td>
 <td>
 <span>{item.reason || "未提供原因"}</span>
 <small>{[item.action, item.media].filter(Boolean).join("｜")}</small>
@@ -618,7 +925,8 @@ export default function Home() {
 <td>
 <small>{[item.authority, item.sourceLayer].filter(Boolean).join("｜")}</small>
 <a href={item.url} target="_blank" rel="noreferrer">開啟官方來源 ↗</a>
-{databaseTab === "local" && <a className="correction-link" href={localCorrectionIssueUrl(item)} target="_blank" rel="noreferrer">回報欄位修正 ↗</a>}
+{databaseTab === "local" && <button className="correction-link correction-button" onClick={() => openCorrectionForm(item)}>提出欄位修正</button>}
+{databaseTab === "local" && item.correctionIssueUrl && <a className="correction-link" href={item.correctionIssueUrl} target="_blank" rel="noreferrer">查看修正審核 ↗</a>}
 </td>
 </tr> : <tr key={`${item.date}-${item.url}-${index}`}>
 <td>
@@ -627,14 +935,74 @@ export default function Home() {
 </td>
 <td>
 <strong>{item.title}</strong>
-{databaseTab === "daily" && <div className="news-entities"><span className={`parse-badge ${item.parseStatus === "parsed" ? "parsed" : "title-only"}`}>{item.parseStatus === "parsed" ? "新聞內文已解析" : "僅取得標題"}</span>{item.products?.length ? <small>商品／品牌：{[...(item.products || []), ...(item.brands || [])].join("、")}</small> : null}{item.companies?.length ? <small>來源／相關業者：{item.companies.join("、")}</small> : null}{item.evidence?.[0] ? <small>證據句：{item.evidence[0]}</small> : null}</div>}
+{databaseTab === "daily" && <div className="news-entities"><div className="parse-badges"><span className={`parse-badge ${item.parseStatus === "parsed" ? "parsed" : "title-only"}`}>{item.parseStatus === "parsed" ? "新聞內文已解析" : "僅取得標題"}</span>{item.correctionIssueUrl && <span className="parse-badge corrected">✓ 人工核准解析修正</span>}</div>{item.products?.length || item.brands?.length ? <small>商品／品牌：{[...(item.products || []), ...(item.brands || [])].join("、")}</small> : null}{item.companies?.length ? <small>來源／相關業者：{item.companies.join("、")}</small> : null}{item.evidence?.[0] ? <small>證據句：{item.evidence[0]}</small> : null}</div>}
 </td>
 <td>
 <span>{item.region || (databaseTab === "daily" ? "新聞搜尋線索" : "未提供")}</span>{item.note && <small>{item.note}</small>}</td>
 <td>
-<a href={item.articleUrl || item.url} target="_blank" rel="noreferrer">開啟新聞原文 ↗</a>{item.issueUrl && <a href={item.issueUrl} target="_blank" rel="noreferrer">審核紀錄 ↗</a>}</td>
+<a href={item.articleUrl || item.url} target="_blank" rel="noreferrer">開啟新聞原文 ↗</a>{item.issueUrl && <a href={item.issueUrl} target="_blank" rel="noreferrer">審核紀錄 ↗</a>}{databaseTab === "daily" && <button className="correction-link correction-button" onClick={() => openNewsCorrectionForm(item)}>回報新聞解析修正</button>}{databaseTab === "daily" && item.correctionIssueUrl && <a className="correction-link" href={item.correctionIssueUrl} target="_blank" rel="noreferrer">查看解析修正審核 ↗</a>}</td>
 </tr>)}</tbody>
 </table>{databaseFiltered.length === 0 && <div className="database-empty">沒有符合的資料，請換一個關鍵字。</div>}</div>{databaseFiltered.length > 100 && <p className="database-limit">為保持頁面順暢，目前顯示前 100 筆；請輸入關鍵字縮小範圍。</p>}</>}</div>
+</section>}
+    {adminOpen && <section className="database-page admin-page" role="dialog" aria-modal="true" aria-label="管理審核">
+<header>
+<div>
+<p className="eyebrow">ADMIN REVIEW</p>
+<h2>管理審核</h2>
+<p>只有 GitHub 帳號 {GITHUB_OWNER} 可以送出核准；憑證只保留在目前頁面記憶體。</p>
+</div>
+<button className="database-close" onClick={closeAdmin}>關閉並清除憑證 ×</button>
+</header>
+<div className="admin-body">
+{!adminUser ? <div className="admin-login">
+<section>
+<span className="source-badge manual">管理者專用</span>
+<h3>使用 GitHub 憑證驗證身分</h3>
+<p>管理頁網址仍是公開的，但沒有你的 GitHub 憑證就不能核准或更新資料。憑證不會寫入網站、資料庫或永久儲存。</p>
+<label htmlFor="github-admin-token">GitHub fine-grained personal access token</label>
+<div className="admin-token-row">
+<input id="github-admin-token" type="password" autoComplete="off" spellCheck={false} value={adminToken} onChange={(event) => { setAdminToken(event.target.value); setAdminError(""); }} onKeyDown={(event) => event.key === "Enter" && !adminLoading && signInAdmin()} placeholder="github_pat_..."/>
+<button className="primary" disabled={!adminToken.trim() || adminLoading} onClick={signInAdmin}>{adminLoading ? "驗證中…" : "驗證並開啟"}</button>
+</div>
+{adminError && <p className="error">{adminError}</p>}
+</section>
+<aside>
+<h3>第一次使用只需設定一次</h3>
+<ol>
+<li>開啟 GitHub 建立細部權限憑證。</li>
+<li>Repository access 只選 <b>{GITHUB_REPO}</b>。</li>
+<li>Repository permissions 將 <b>Issues</b> 設為 <b>Read and write</b>。</li>
+<li>建立後請存入密碼管理工具；每次進入本頁再貼上。建議設定到期日。</li>
+</ol>
+<a href={GITHUB_TOKEN_URL} target="_blank" rel="noreferrer">前往建立 GitHub 憑證 ↗</a>
+</aside>
+</div> : <>
+<div className="admin-summary">
+<div><span>登入帳號</span><strong>{adminUser}</strong><small>已通過管理者身分驗證</small></div>
+<div><span>待審核</span><strong>{adminIssues.length}</strong><small>新聞收錄、官方欄位與新聞解析修正</small></div>
+<button onClick={() => { setAdminUser(""); setAdminToken(""); setAdminIssues([]); setSelectedIssue(null); setAdminStatus(""); }}>登出並清除憑證</button>
+</div>
+{adminStatus && <p className="admin-status">{adminStatus}</p>}
+{adminError && <p className="error admin-message">{adminError}</p>}
+<div className="admin-review-list">
+{adminIssues.map((issue) => {
+  const kind = reviewKind(issue);
+  return <article className={selectedIssue === issue.number ? "selected" : ""} key={issue.number}>
+<label>
+<input type="checkbox" checked={selectedIssue === issue.number} onChange={() => { setSelectedIssue(selectedIssue === issue.number ? null : issue.number); setAdminError(""); }}/>
+<span className={`review-kind ${kind}`}>{kind === "correction" ? "欄位修正" : kind === "newsCorrection" ? "新聞解析修正" : "新聞線索"}</span>
+<span className="review-number">#{issue.number}</span>
+</label>
+<h3>{issue.title}</h3>
+<p>{issue.body?.replace(/[#*_>`-]/g, " ").replace(/\s+/g, " ").trim().slice(0, 240) || "未提供案件內容"}</p>
+<div><span>提交者：{issue.user?.login || "未提供"}｜{new Date(issue.created_at).toLocaleString("zh-TW", { timeZone: "Asia/Taipei", hour12: false })}</span><a href={issueSourceUrl(issue)} target="_blank" rel="noreferrer">核對原始來源 ↗</a><a href={issue.html_url} target="_blank" rel="noreferrer">查看 GitHub 案件 ↗</a></div>
+</article>;
+})}
+{adminIssues.length === 0 && <div className="admin-empty"><strong>目前沒有待審核案件</strong><span>新的新聞線索、官方欄位修正或新聞解析修正送出後，會顯示在這裡。</span></div>}
+</div>
+{adminIssues.length > 0 && <div className="admin-approve-bar"><div><b>{selectedIssue ? `已選擇 #${selectedIssue}` : "請勾選一件案件"}</b><small>核准前請先開啟原始來源，確認產品、業者、日期與事件內容。</small></div><button className="primary" disabled={!selectedIssue || adminLoading} onClick={approveSelectedIssue}>{adminLoading ? "送出中…" : "確認核准並更新網站"}</button></div>}
+</>}
+</div>
 </section>}
     {sourcesOpen && <section className="database-page sources-page" role="dialog" aria-modal="true" aria-label="資料來源說明">
 <header>
@@ -692,10 +1060,10 @@ export default function Home() {
 </article>
 <article>
 <span className="source-badge official">官方資料 3</span>
-<h3>六都衛生局第二層資料</h3>
+<h3>地方衛生局第二層資料</h3>
 <dl>
-<div><dt>涵蓋單位</dt><dd>臺北、新北、桃園、臺中、臺南及高雄市政府衛生局</dd></div>
-<div><dt>自動比對</dt><dd>臺北、桃園、臺中、臺南讀取結構化資料；新北與高雄另逐篇解析公告正文及 PDF，只納入含不合格、不符、超標、下架或回收證據的內容</dd></div>
+<div><dt>涵蓋單位</dt><dd>臺北、新北、桃園、臺中、臺南、高雄、花蓮及臺東地方衛生主管機關</dd></div>
+<div><dt>自動比對</dt><dd>臺北、桃園、臺中、臺南讀取結構化資料；新北與高雄另逐篇解析公告正文及 PDF；花蓮與臺東由食藥署同步的地方衛生局官方新聞納入，只保留具有違規證據的紀錄</dd></div>
 <div><dt>解析失敗</dt><dd>無法取得正文或 PDF 時會排除自動命中，保留失敗狀態並於下次每日更新重試</dd></div>
 <div><dt>更新方式</dt><dd>每天逐一連線；單一城市失敗會顯示狀態，不影響其他來源</dd></div>
 </dl>
@@ -730,6 +1098,10 @@ export default function Home() {
 <div>
 <dt>內文解析</dt>
 <dd>能讀取原文時，另存商品、品牌、來源／相關業者及短證據句；遇到網站阻擋或無法讀取時標示「僅取得標題」，不推測缺少內容</dd>
+</div>
+<div>
+<dt>人工修正</dt>
+<dd>若商品、品牌、相關業者或證據句解析錯誤，可由使用者回報、管理者核准；修正會在每日更新後重新套用並保留原始解析結果</dd>
 </div>
 </dl>
 <a href={GOOGLE_NEWS_URL} target="_blank" rel="noreferrer">開啟 Google 新聞 ↗</a>

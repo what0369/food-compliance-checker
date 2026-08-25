@@ -1,0 +1,38 @@
+name: 核准每日新聞解析修正
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  approve:
+    if: >-
+      github.event.issue.pull_request == null &&
+      github.event.comment.body == '/套用新聞修正' &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: 保存並套用新聞解析修正
+        run: node scripts/approve-news-correction.mjs
+        env:
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_URL: ${{ github.event.issue.html_url }}
+      - name: 提交新聞解析修正
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add public/data/news-corrections.json public/data/news.json
+          git commit -m "套用每日新聞解析修正 #${{ github.event.issue.number }}"
+          git push
+      - name: 回覆並關閉議題
+        run: gh issue close "${{ github.event.issue.number }}" --comment "已核准並套用新聞解析修正；原始新聞資料仍保留，網站將自動重新發布。"
+        env:
+          GH_TOKEN: ${{ github.token }}

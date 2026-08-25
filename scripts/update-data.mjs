@@ -1,5 +1,6 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { updateLocalOfficial } from "./update-local-data.mjs";
+import { applyNewsCorrections, loadNewsCorrections, restoreNewsOriginal } from "./news-corrections.mjs";
 
 const ADS_URL = "https://data.fda.gov.tw/data/opendata/22/json";
 const IMPORTS_URL = "https://data.fda.gov.tw/data/opendata/52/json";
@@ -225,15 +226,17 @@ async function fetchNews(query, since) {
 
 async function updateNews(now, since) {
   const previous = JSON.parse(await readFile(NEWS_FILE, "utf8").catch(() => '{"items":[]}'));
+  const previousItems = (previous.items || []).map(restoreNewsOriginal);
   const queries = ["食品 違規", "食品 裁罰", "食品 誇大廣告", "食品 不合格", "食品 回收", "食品 下架"];
   const fresh = (await Promise.all(queries.map((query) => fetchNews(query, since)))).flat();
-  const oldByKey = new Map((previous.items || []).map((item) => [`${compact(item.title)}|${item.date}`, item]));
-  const merged = [...fresh, ...(previous.items || [])].filter((item) => new Date(item.date) >= since).map((item) => ({ ...item, ...(oldByKey.get(`${compact(item.title)}|${item.date}`) || {}) }));
+  const oldByKey = new Map(previousItems.map((item) => [`${compact(item.title)}|${item.date}`, item]));
+  const merged = [...fresh, ...previousItems].filter((item) => new Date(item.date) >= since).map((item) => ({ ...item, ...(oldByKey.get(`${compact(item.title)}|${item.date}`) || {}) }));
   const unique = [...new Map(merged.map((item) => [`${compact(item.title)}|${item.date}`, item])).values()].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 2000);
   const candidates = unique.filter((item) => item.parseStatus !== "parsed" || item.parseVersion !== NEWS_PARSE_VERSION).slice(0, ARTICLE_PARSE_LIMIT);
   const enriched = await mapConcurrent(candidates, 4, enrichNewsItem);
   const enrichedByKey = new Map(enriched.map((item) => [`${compact(item.title)}|${item.date}`, item]));
-  const items = unique.map((item) => enrichedByKey.get(`${compact(item.title)}|${item.date}`) || item);
+  const parsedItems = unique.map((item) => enrichedByKey.get(`${compact(item.title)}|${item.date}`) || item);
+  const items = applyNewsCorrections(parsedItems, await loadNewsCorrections());
   const parsedCount = items.filter((item) => item.parseStatus === "parsed").length;
   await writeFile(NEWS_FILE, JSON.stringify({ updatedAt: now.toISOString(), available: true, parsedCount, titleOnlyCount: items.length - parsedCount, items }));
 }

@@ -1,6 +1,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { collectHealthBureauNews } from "./update-health-news.mjs";
 import { collectLocalAnnouncements } from "./update-local-announcements.mjs";
+import { applyLocalCorrections, loadLocalCorrections } from "./local-corrections.mjs";
 
 const OUTPUT = new URL("../public/data/local-official.json", import.meta.url);
 const DATASETS = {
@@ -149,10 +150,19 @@ export async function updateLocalOfficial(now = new Date()) {
   const healthNews = await collectHealthBureauNews(now, since, previous.records || []);
   records.push(...healthNews.records);
   sources.push(healthNews.source);
+  const eastCoastSources = [
+    { city: "花蓮縣", aliases: ["花蓮縣"] },
+    { city: "臺東縣", aliases: ["臺東縣", "台東縣"] },
+  ];
+  for (const source of eastCoastSources) {
+    const recordCount = healthNews.records.filter((item) => source.aliases.includes(item.city)).length;
+    sources.push({ city: source.city, datasetUrl: "https://www.fda.gov.tw/tc/csmnews.aspx", mode: "地方衛生局官方新聞（食藥署同步）", status: "已由食藥署同步", recordCount });
+  }
   const localAnnouncements = await collectLocalAnnouncements(now, since, previous.records || []);
   for (const result of localAnnouncements) { records.push(...result.records); sources.push(result.source); }
   const unique = [...new Map(records.map((item) => [`${compact(item.city)}|${compact(item.product)}|${compact(item.company)}|${item.date}|${compact(item.reason)}`, item])).values()]
     .sort((a, b) => b.date.localeCompare(a.date));
-  await writeFile(OUTPUT, JSON.stringify({ updatedAt: now.toISOString(), periodStart: since.toISOString().slice(0, 10), periodEnd: now.toISOString().slice(0, 10), records: unique, sources }));
-  return { records: unique, sources };
+  const corrected = applyLocalCorrections(unique, await loadLocalCorrections());
+  await writeFile(OUTPUT, JSON.stringify({ updatedAt: now.toISOString(), periodStart: since.toISOString().slice(0, 10), periodEnd: now.toISOString().slice(0, 10), records: corrected, sources }));
+  return { records: corrected, sources };
 }

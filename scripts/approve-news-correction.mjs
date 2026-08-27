@@ -34,16 +34,20 @@ export function parseNewsCorrectionIssue(body, issueUrl = "") {
     url: field(source, "新聞網址"),
   };
   const set = {};
-  for (const [fieldName, label] of [["products", "商品／產品"], ["brands", "品牌"], ["companies", "相關業者"], ["evidence", "證據句"]]) {
+  for (const [fieldName, label] of [["products", "商品／產品"], ["brands", "品牌"], ["manufacturers", "製造商"], ["importers", "進口商"], ["suppliers", "供應商／來源業者"], ["retailers", "販售商／通路"], ["otherCompanies", "其他相關業者"], ["evidence", "證據句"]]) {
     const value = parsedList(field(corrected, label));
     if (value !== undefined) set[fieldName] = value;
+  }
+  if (set.otherCompanies === undefined) {
+    const legacyCompanies = parsedList(field(corrected, "相關業者"));
+    if (legacyCompanies !== undefined) set.otherCompanies = legacyCompanies;
   }
   const reason = section(body, "修正理由或原文位置");
   if (!match.url) throw new Error("新聞解析修正缺少新聞網址");
   const parsedUrl = new URL(match.url);
   if (!/^https?:$/.test(parsedUrl.protocol)) throw new Error("新聞網址必須是 http 或 https");
   if (!match.title || !/^\d{4}-\d{2}-\d{2}$/.test(match.date)) throw new Error("新聞解析修正缺少標題或正確日期");
-  if (!Object.keys(set).length) throw new Error("請至少填寫一個需要修正的商品、品牌、相關業者或證據句");
+  if (!Object.keys(set).length) throw new Error("請至少填寫一個需要修正的商品、品牌、業者角色或證據句");
   if (!reason) throw new Error("請填寫修正理由或原文位置");
   return { match, set, reason, issueUrl };
 }

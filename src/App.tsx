@@ -11,11 +11,11 @@ type OfficialMatch = { item: OfficialItem; relation: Exclude<Relation, "news">; 
 type Result = UploadRow & { status: Status; count: number; latest: string; note: string; query: string; evidence: Evidence[] };
 type OfficialItem = { kind: string; product: string; company: string; date: string; authority: string; reason: string; url: string; manufacturer?: string; brand?: string; media?: string; action?: string; city?: string; sourceLayer?: string; matchable?: boolean; parseStatus?: string; correctionIssueUrl?: string; correctionNote?: string; correctionApprovedAt?: string };
 type LocalSource = { city: string; datasetUrl: string; mode: string; status: string; recordCount: number; message?: string };
-type NewsItem = { title: string; url: string; articleUrl?: string; date: string; source: string; region?: string; manual?: boolean; note?: string; products?: string[]; companies?: string[]; brands?: string[]; evidence?: string[]; parseStatus?: "parsed" | "titleOnly"; parseMessage?: string; correctionIssueUrl?: string; correctionNote?: string; correctionApprovedAt?: string; originalParsedEntities?: { products?: string[]; companies?: string[]; brands?: string[]; evidence?: string[] } };
+type NewsItem = { title: string; url: string; articleUrl?: string; date: string; source: string; region?: string; manual?: boolean; note?: string; products?: string[]; companies?: string[]; brands?: string[]; manufacturers?: string[]; importers?: string[]; suppliers?: string[]; retailers?: string[]; otherCompanies?: string[]; evidence?: string[]; parseStatus?: "parsed" | "titleOnly"; parseMessage?: string; correctionIssueUrl?: string; correctionNote?: string; correctionApprovedAt?: string; originalParsedEntities?: { products?: string[]; companies?: string[]; brands?: string[]; manufacturers?: string[]; importers?: string[]; suppliers?: string[]; retailers?: string[]; otherCompanies?: string[]; evidence?: string[] } };
 type ManualNewsItem = NewsItem & { note?: string; approvedAt?: string; issueUrl?: string };
 type NewsSubmission = { url: string; note: string };
 type LocalCorrectionSubmission = { product: string; company: string; manufacturer: string; reason: string };
-type NewsCorrectionSubmission = { products: string; brands: string; companies: string; evidence: string; reason: string };
+type NewsCorrectionSubmission = { products: string; brands: string; manufacturers: string; importers: string; suppliers: string; retailers: string; companies: string; evidence: string; reason: string };
 type ReviewKind = "news" | "correction" | "newsCorrection";
 type GitHubReviewIssue = { number: number; title: string; body: string | null; html_url: string; created_at: string; user?: { login?: string }; pull_request?: unknown };
 type DatabaseTab = "official" | "local" | "manual" | "daily";
@@ -95,8 +95,15 @@ function newsNameTerms(value: string, minimumLength = 3) {
   return [...new Set([full, withoutCategory])].filter((term) => term.length >= minimumLength);
 }
 function newsSearchable(item: NewsItem) {
-  return compact([item.title, item.note || "", ...(item.products || []), ...(item.companies || []), ...(item.brands || []), ...(item.evidence || [])].join(" "));
+  return compact([item.title, item.note || "", ...(item.products || []), ...allNewsCompanies(item), ...(item.brands || []), ...(item.evidence || [])].join(" "));
 }
+function newsRoleCompanies(item: NewsItem) { return [...new Set([...(item.manufacturers || []), ...(item.importers || []), ...(item.suppliers || []), ...(item.retailers || [])])]; }
+function otherNewsCompanies(item: NewsItem) {
+  if (Array.isArray(item.otherCompanies) && (item.otherCompanies.length || !(item.companies?.length))) return item.otherCompanies;
+  const roleKeys = new Set(newsRoleCompanies(item).map(compact));
+  return (item.companies || []).filter((company) => !roleKeys.has(compact(company)));
+}
+function allNewsCompanies(item: NewsItem) { return [...new Set([...(item.companies || []), ...newsRoleCompanies(item), ...otherNewsCompanies(item)])]; }
 function newsMatches(row: UploadRow, items: NewsItem[]) {
   const keyword = row.keyword || "";
   const candidates = [...[row.supplier, row.manufacturer].flatMap((value) => newsNameTerms(value)), ...newsNameTerms(keyword, 2)];
@@ -109,7 +116,7 @@ function newsMatches(row: UploadRow, items: NewsItem[]) {
 function newsMatchBasis(row: UploadRow, item: NewsItem) {
   const fields = [row.keyword, row.supplier, row.manufacturer, row.brand, row.product].filter(Boolean) as string[];
   const title = compact(item.title);
-  const bodyFields = compact([item.note || "", ...(item.products || []), ...(item.companies || []), ...(item.brands || []), ...(item.evidence || [])].join(" "));
+  const bodyFields = compact([item.note || "", ...(item.products || []), ...allNewsCompanies(item), ...(item.brands || []), ...(item.evidence || [])].join(" "));
   const match = fields.flatMap((field) => newsNameTerms(field, field === row.keyword ? 2 : 3).map((term) => ({ field, term }))).find(({ term }) => title.includes(term) || bodyFields.includes(term));
   if (!match) return `新聞名稱與「${newsKey(row)}」可能相關；仍須開啟原文核對`;
   if (match.term !== compact(match.field)) return `新聞名稱「${match.term}」與清單名稱「${match.field}」部分相符；僅列新聞線索，須人工核對是否為同一品牌或業者`;
@@ -165,12 +172,20 @@ function buildNewsCorrectionIssue(item: NewsItem, correction: NewsCorrectionSubm
     "", "## 目前解析結果",
     `- 商品／產品：${shown(item.products)}`,
     `- 品牌：${shown(item.brands)}`,
-    `- 相關業者：${shown(item.companies)}`,
+    `- 製造商：${shown(item.manufacturers)}`,
+    `- 進口商：${shown(item.importers)}`,
+    `- 供應商／來源業者：${shown(item.suppliers)}`,
+    `- 販售商／通路：${shown(item.retailers)}`,
+    `- 其他相關業者：${shown(otherNewsCompanies(item))}`,
     `- 證據句：${shown(item.evidence)}`,
     "", "## 請填寫正確內容",
     `- 商品／產品：${issueList(correction.products)}`,
     `- 品牌：${issueList(correction.brands)}`,
-    `- 相關業者：${issueList(correction.companies)}`,
+    `- 製造商：${issueList(correction.manufacturers)}`,
+    `- 進口商：${issueList(correction.importers)}`,
+    `- 供應商／來源業者：${issueList(correction.suppliers)}`,
+    `- 販售商／通路：${issueList(correction.retailers)}`,
+    `- 其他相關業者：${issueList(correction.companies)}`,
     `- 證據句：${issueList(correction.evidence)}`,
     "", "## 修正理由或原文位置",
     safeReason,
@@ -242,7 +257,7 @@ export default function Home() {
   const [correctionSubmitStatus, setCorrectionSubmitStatus] = useState("");
   const [correctionError, setCorrectionError] = useState("");
   const [newsCorrectionItem, setNewsCorrectionItem] = useState<NewsItem | null>(null);
-  const [newsCorrectionForm, setNewsCorrectionForm] = useState<NewsCorrectionSubmission>({ products: "", brands: "", companies: "", evidence: "", reason: "" });
+  const [newsCorrectionForm, setNewsCorrectionForm] = useState<NewsCorrectionSubmission>({ products: "", brands: "", manufacturers: "", importers: "", suppliers: "", retailers: "", companies: "", evidence: "", reason: "" });
   const [newsCorrectionSubmitStatus, setNewsCorrectionSubmitStatus] = useState("");
   const [newsCorrectionError, setNewsCorrectionError] = useState("");
   const [databaseOpen, setDatabaseOpen] = useState(false);
@@ -251,7 +266,8 @@ export default function Home() {
   const [adminToken, setAdminToken] = useState("");
   const [adminUser, setAdminUser] = useState("");
   const [adminIssues, setAdminIssues] = useState<GitHubReviewIssue[]>([]);
-  const [selectedIssue, setSelectedIssue] = useState<number | null>(null);
+  const [selectedIssues, setSelectedIssues] = useState<number[]>([]);
+  const [rejectReason, setRejectReason] = useState("");
   const [adminLoading, setAdminLoading] = useState(false);
   const [adminError, setAdminError] = useState("");
   const [adminStatus, setAdminStatus] = useState("");
@@ -267,7 +283,7 @@ export default function Home() {
     if (!databaseData) return [] as (OfficialItem | ManualNewsItem)[];
     const items: (OfficialItem | ManualNewsItem)[] = databaseTab === "official" ? databaseData.official : databaseTab === "local" ? databaseData.local : databaseTab === "manual" ? databaseData.manual : databaseData.daily;
     const query = compact(databaseQuery);
-    return items.filter((item) => !query || compact("product" in item ? [item.kind, item.product, item.brand, item.company, item.manufacturer, item.authority, item.reason, item.media, item.action].filter(Boolean).join(" ") : [item.title, item.source, item.region, item.note, ...(item.products || []), ...(item.companies || []), ...(item.brands || []), ...(item.evidence || [])].filter(Boolean).join(" ")).includes(query)).sort((a, b) => b.date.localeCompare(a.date));
+    return items.filter((item) => !query || compact("product" in item ? [item.kind, item.product, item.brand, item.company, item.manufacturer, item.authority, item.reason, item.media, item.action].filter(Boolean).join(" ") : [item.title, item.source, item.region, item.note, ...(item.products || []), ...allNewsCompanies(item), ...(item.brands || []), ...(item.evidence || [])].filter(Boolean).join(" ")).includes(query)).sort((a, b) => b.date.localeCompare(a.date));
   }, [databaseData, databaseQuery, databaseTab]);
   const today = new Date();
   const localDate = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
@@ -282,7 +298,8 @@ export default function Home() {
         setAdminToken("");
         setAdminUser("");
         setAdminIssues([]);
-        setSelectedIssue(null);
+        setSelectedIssues([]);
+        setRejectReason("");
         setAdminError("");
         setAdminStatus("");
       }
@@ -302,7 +319,8 @@ export default function Home() {
     setAdminToken("");
     setAdminUser("");
     setAdminIssues([]);
-    setSelectedIssue(null);
+    setSelectedIssues([]);
+    setRejectReason("");
     setAdminError("");
     setAdminStatus("");
   }
@@ -337,6 +355,19 @@ export default function Home() {
     });
   }
 
+  async function waitForIssueClosure(issueNumber: number, timeoutMs = 180_000) {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      await new Promise((resolve) => window.setTimeout(resolve, 4_000));
+      const response = await githubRequest(`/repos/${GITHUB_OWNER}/${GITHUB_REPO}/issues/${issueNumber}`, adminToken.trim());
+      if (response.ok) {
+        const issue = await response.json() as { state?: string };
+        if (issue.state === "closed") return true;
+      }
+    }
+    return false;
+  }
+
   async function loadAdminIssues(token = adminToken) {
     const response = await githubRequest(`/repos/${GITHUB_OWNER}/${GITHUB_REPO}/issues?state=open&per_page=100&sort=created&direction=desc`, token);
     if (!response.ok) throw new Error(response.status === 401 ? "GitHub 憑證無效或已過期。" : "目前無法讀取待審核清單，請稍後再試。");
@@ -355,31 +386,87 @@ export default function Home() {
       if (user.login?.toLowerCase() !== GITHUB_OWNER) throw new Error(`此管理頁只接受 ${GITHUB_OWNER} 帳號。`);
       await loadAdminIssues(token);
       setAdminUser(user.login);
-      setAdminStatus("身分驗證完成。請核對原始來源後，勾選一件案件核准。");
+      setAdminStatus("身分驗證完成。請核對原始來源後，可勾選一件或多件案件進行核准或拒絕。");
     } catch (cause) { setAdminError(cause instanceof Error ? cause.message : "管理者登入失敗。"); }
     finally { setAdminLoading(false); }
   }
 
-  async function approveSelectedIssue() {
-    const issue = adminIssues.find((item) => item.number === selectedIssue);
-    if (!issue) { setAdminError("請先勾選一件待審核案件。"); return; }
-    const kind = reviewKind(issue);
-    const kindLabel = kind === "correction" ? "欄位修正" : kind === "newsCorrection" ? "新聞解析修正" : "新聞線索";
-    if (!window.confirm(`確定已核對原始來源，並核准這筆${kindLabel}嗎？\n\n#${issue.number} ${issue.title}`)) return;
+  function toggleSelectedIssue(issueNumber: number) {
+    setSelectedIssues((items) => items.includes(issueNumber) ? items.filter((number) => number !== issueNumber) : [...items, issueNumber]);
+    setAdminError("");
+  }
+
+  async function approveSelectedIssues() {
+    const issues = adminIssues.filter((item) => selectedIssues.includes(item.number));
+    if (!issues.length) { setAdminError("請先勾選至少一件待審核案件。"); return; }
+    const issueList = issues.map((issue) => `#${issue.number} ${issue.title}`).join("\n");
+    if (!window.confirm(`確定已逐一核對原始來源，並核准這 ${issues.length} 筆案件嗎？\n\n${issueList}`)) return;
     setAdminLoading(true); setAdminError(""); setAdminStatus("");
+    const completed: number[] = [];
+    const failed: number[] = [];
+    let permissionError = false;
     try {
-      const response = await githubRequest(`/repos/${GITHUB_OWNER}/${GITHUB_REPO}/issues/${issue.number}/comments`, adminToken.trim(), {
-        method: "POST",
-        body: JSON.stringify({ body: reviewCommand(issue) }),
-      });
-      if (!response.ok) {
-        if (response.status === 403) throw new Error("這個憑證沒有 Issues 讀寫權限，請依下方說明重新建立。");
-        throw new Error("核准指令送出失敗，請稍後再試。");
+      for (let index = 0; index < issues.length; index += 1) {
+        const issue = issues[index];
+        const response = await githubRequest(`/repos/${GITHUB_OWNER}/${GITHUB_REPO}/issues/${issue.number}/comments`, adminToken.trim(), {
+          method: "POST",
+          body: JSON.stringify({ body: reviewCommand(issue) }),
+        });
+        if (response.ok) {
+          setAdminStatus(`已送出第 ${index + 1}/${issues.length} 筆核准，等待資料更新完成後再處理下一筆；請保持此頁開啟。`);
+          if (await waitForIssueClosure(issue.number)) completed.push(issue.number);
+          else {
+            failed.push(...issues.slice(index).map((item) => item.number));
+            break;
+          }
+        } else {
+          if (response.status === 403) permissionError = true;
+          failed.push(issue.number);
+        }
       }
-      setAdminIssues((items) => items.filter((item) => item.number !== issue.number));
-      setSelectedIssue(null);
-      setAdminStatus(`已核准 #${issue.number}；GitHub 正在更新資料庫並重新發布網站，通常需要 1～3 分鐘。`);
+      setAdminIssues((items) => items.filter((item) => !completed.includes(item.number)));
+      setSelectedIssues(failed);
+      if (completed.length) setAdminStatus(`已核准 ${completed.length} 筆案件；GitHub 會依序更新資料庫並重新發布網站。`);
+      if (failed.length) setAdminError(permissionError ? "這個憑證沒有 Issues 讀寫權限，失敗案件已保留勾選。" : `${failed.length} 筆核准指令送出失敗，已保留勾選，請稍後重試。`);
     } catch (cause) { setAdminError(cause instanceof Error ? cause.message : "核准失敗。"); }
+    finally { setAdminLoading(false); }
+  }
+
+  async function rejectSelectedIssues() {
+    const issues = adminIssues.filter((item) => selectedIssues.includes(item.number));
+    if (!issues.length) { setAdminError("請先勾選至少一件待審核案件。"); return; }
+    const reason = rejectReason.trim();
+    const issueList = issues.map((issue) => `#${issue.number} ${issue.title}`).join("\n");
+    if (!window.confirm(`確定拒絕並關閉這 ${issues.length} 筆案件嗎？\n拒絕後不會寫入資料庫，也不會重新發布網站。\n\n${issueList}`)) return;
+    setAdminLoading(true); setAdminError(""); setAdminStatus("");
+    const completed: number[] = [];
+    const failed: number[] = [];
+    let permissionError = false;
+    try {
+      for (const issue of issues) {
+        const comment = await githubRequest(`/repos/${GITHUB_OWNER}/${GITHUB_REPO}/issues/${issue.number}/comments`, adminToken.trim(), {
+          method: "POST",
+          body: JSON.stringify({ body: reason ? `管理者審核結果：拒絕\n\n原因：${reason}\n\n此案件未寫入資料庫，亦未觸發網站重新發布。` : "管理者審核結果：拒絕。此案件未寫入資料庫，亦未觸發網站重新發布。" }),
+        });
+        if (!comment.ok) {
+          if (comment.status === 403) permissionError = true;
+          failed.push(issue.number);
+          continue;
+        }
+        const close = await githubRequest(`/repos/${GITHUB_OWNER}/${GITHUB_REPO}/issues/${issue.number}`, adminToken.trim(), {
+          method: "PATCH",
+          body: JSON.stringify({ state: "closed", state_reason: "not_planned" }),
+        });
+        if (close.ok) completed.push(issue.number); else failed.push(issue.number);
+      }
+      setAdminIssues((items) => items.filter((item) => !completed.includes(item.number)));
+      setSelectedIssues(failed);
+      if (completed.length) {
+        setAdminStatus(`已拒絕並關閉 ${completed.length} 筆案件；未寫入資料庫，也未觸發網站重新發布。`);
+        setRejectReason("");
+      }
+      if (failed.length) setAdminError(permissionError ? "這個憑證沒有 Issues 讀寫權限，失敗案件已保留勾選。" : `${failed.length} 筆拒絕操作失敗，已保留勾選，請稍後重試。`);
+    } catch (cause) { setAdminError(cause instanceof Error ? cause.message : "拒絕操作失敗。"); }
     finally { setAdminLoading(false); }
   }
 
@@ -423,7 +510,7 @@ export default function Home() {
         const matched = officialMatches(row, officialItems);
         const news = newsMatches(row, newsItems);
         const officialEvidence = matched.map<Evidence>(({ item, basis, relation }) => ({ kind: item.kind, title: item.product || item.company, date: item.date, source: item.authority, url: item.url, reason: item.reason, basis, relation, recordCompany: item.company || item.manufacturer, recordProduct: item.product, media: item.media, action: item.action }));
-        const newsEvidence = news.map<Evidence>((item) => ({ kind: item.manual ? "人工核准新聞線索" : item.parseStatus === "parsed" ? "新聞內文已解析" : "新聞搜尋線索（僅標題）", title: item.title, date: item.date, source: [item.source || "Google 新聞", item.region].filter(Boolean).join("／"), url: item.articleUrl || item.url, basis: newsMatchBasis(row, item), relation: "news", parsedProducts: item.products, parsedCompanies: item.companies, evidenceSentence: newsEvidenceSentence(row, item), parseStatus: item.parseStatus }));
+        const newsEvidence = news.map<Evidence>((item) => ({ kind: item.manual ? "人工核准新聞線索" : item.parseStatus === "parsed" ? "新聞內文已解析" : "新聞搜尋線索（僅標題）", title: item.title, date: item.date, source: [item.source || "Google 新聞", item.region].filter(Boolean).join("／"), url: item.articleUrl || item.url, basis: newsMatchBasis(row, item), relation: "news", parsedProducts: item.products, parsedCompanies: allNewsCompanies(item), evidenceSentence: newsEvidenceSentence(row, item), parseStatus: item.parseStatus }));
         if (officialEvidence.length) {
           const relation: Relation = officialEvidence.some((item) => item.relation === "sameProduct") ? "sameProduct" : officialEvidence.some((item) => item.relation === "relatedCategory") ? "relatedCategory" : "sameParty";
           const status: Status = relation === "sameProduct" ? "同商品紀錄" : relation === "relatedCategory" ? "相關品類，需加強查證" : "同品牌／供應商其他商品";
@@ -539,21 +626,21 @@ export default function Home() {
 
   function openNewsCorrectionForm(item: NewsItem) {
     setNewsCorrectionItem(item);
-    setNewsCorrectionForm({ products: "", brands: "", companies: "", evidence: "", reason: "" });
+    setNewsCorrectionForm({ products: "", brands: "", manufacturers: "", importers: "", suppliers: "", retailers: "", companies: "", evidence: "", reason: "" });
     setNewsCorrectionSubmitStatus("");
     setNewsCorrectionError("");
   }
 
   function closeNewsCorrectionForm() {
     setNewsCorrectionItem(null);
-    setNewsCorrectionForm({ products: "", brands: "", companies: "", evidence: "", reason: "" });
+    setNewsCorrectionForm({ products: "", brands: "", manufacturers: "", importers: "", suppliers: "", retailers: "", companies: "", evidence: "", reason: "" });
     setNewsCorrectionSubmitStatus("");
     setNewsCorrectionError("");
   }
 
   function newsCorrectionIssue() {
     if (!newsCorrectionItem) throw new Error("找不到要修改的新聞，請關閉後重試。");
-    const fields = [newsCorrectionForm.products, newsCorrectionForm.brands, newsCorrectionForm.companies, newsCorrectionForm.evidence].map(clean);
+    const fields = [newsCorrectionForm.products, newsCorrectionForm.brands, newsCorrectionForm.manufacturers, newsCorrectionForm.importers, newsCorrectionForm.suppliers, newsCorrectionForm.retailers, newsCorrectionForm.companies, newsCorrectionForm.evidence].map(clean);
     if (!fields.some(Boolean)) throw new Error("請至少填寫一項正確的商品、品牌、相關業者或證據句；要移除全部內容可輸入「清除」。");
     if (!clean(newsCorrectionForm.reason)) throw new Error("請填寫修改理由或原文位置，方便管理者核對。");
     return buildNewsCorrectionIssue(newsCorrectionItem, newsCorrectionForm);
@@ -837,13 +924,21 @@ export default function Home() {
 <div className="news-current-entities">
 <div><span>目前商品／產品</span><p>{newsCorrectionItem.products?.join("、") || "未提供"}</p></div>
 <div><span>目前品牌</span><p>{newsCorrectionItem.brands?.join("、") || "未提供"}</p></div>
-<div><span>目前相關業者</span><p>{newsCorrectionItem.companies?.join("、") || "未提供"}</p></div>
+<div><span>目前製造商</span><p>{newsCorrectionItem.manufacturers?.join("、") || "未提供"}</p></div>
+<div><span>目前進口商</span><p>{newsCorrectionItem.importers?.join("、") || "未提供"}</p></div>
+<div><span>目前供應商／來源業者</span><p>{newsCorrectionItem.suppliers?.join("、") || "未提供"}</p></div>
+<div><span>目前販售商／通路</span><p>{newsCorrectionItem.retailers?.join("、") || "未提供"}</p></div>
+<div><span>目前其他相關業者</span><p>{otherNewsCompanies(newsCorrectionItem).join("、") || "未提供"}</p></div>
 <div><span>目前證據句</span><p>{newsCorrectionItem.evidence?.join("／") || "未提供"}</p></div>
 </div>
 <div className="correction-form news-correction-form">
 <label>正確商品／產品（每行一項）<textarea value={newsCorrectionForm.products} onChange={(event) => { setNewsCorrectionForm({ ...newsCorrectionForm, products: event.target.value }); setNewsCorrectionError(""); }} placeholder={'例如：\n協億苦茶油\n冷壓苦茶油'} /></label>
 <label>正確品牌（每行一項）<textarea value={newsCorrectionForm.brands} onChange={(event) => { setNewsCorrectionForm({ ...newsCorrectionForm, brands: event.target.value }); setNewsCorrectionError(""); }} placeholder={'例如：\n協億'} /></label>
-<label>正確相關業者（每行一項）<textarea value={newsCorrectionForm.companies} onChange={(event) => { setNewsCorrectionForm({ ...newsCorrectionForm, companies: event.target.value }); setNewsCorrectionError(""); }} placeholder={'例如：\n協億有限公司\n要移除全部內容請填「清除」'} /></label>
+<label>正確製造商（每行一項）<textarea value={newsCorrectionForm.manufacturers} onChange={(event) => { setNewsCorrectionForm({ ...newsCorrectionForm, manufacturers: event.target.value }); setNewsCorrectionError(""); }} placeholder={'只在原文明確標示製造商時填寫'} /></label>
+<label>正確進口商（每行一項）<textarea value={newsCorrectionForm.importers} onChange={(event) => { setNewsCorrectionForm({ ...newsCorrectionForm, importers: event.target.value }); setNewsCorrectionError(""); }} placeholder={'只在原文明確標示進口商時填寫'} /></label>
+<label>正確供應商／來源業者（每行一項）<textarea value={newsCorrectionForm.suppliers} onChange={(event) => { setNewsCorrectionForm({ ...newsCorrectionForm, suppliers: event.target.value }); setNewsCorrectionError(""); }} placeholder={'只在原文明確標示供應或來源角色時填寫'} /></label>
+<label>正確販售商／通路（每行一項）<textarea value={newsCorrectionForm.retailers} onChange={(event) => { setNewsCorrectionForm({ ...newsCorrectionForm, retailers: event.target.value }); setNewsCorrectionError(""); }} placeholder={'只在原文明確標示販售或通路角色時填寫'} /></label>
+<label>正確其他相關業者（每行一項）<textarea value={newsCorrectionForm.companies} onChange={(event) => { setNewsCorrectionForm({ ...newsCorrectionForm, companies: event.target.value }); setNewsCorrectionError(""); }} placeholder={'只填角色不明的業者；例如：\n協億有限公司\n要移除全部內容請填「清除」'} /></label>
 <label>正確證據句（每行一項）<textarea value={newsCorrectionForm.evidence} onChange={(event) => { setNewsCorrectionForm({ ...newsCorrectionForm, evidence: event.target.value }); setNewsCorrectionError(""); }} placeholder="請貼上原文中能直接支持產品、業者及事件的短句" /></label>
 <label>修改理由或原文位置<textarea value={newsCorrectionForm.reason} onChange={(event) => { setNewsCorrectionForm({ ...newsCorrectionForm, reason: event.target.value }); setNewsCorrectionError(""); }} placeholder="例如：原文第三段提到協億是產品製造商；目前系統誤抓到彰化縣衛生局。" /></label>
 </div>
@@ -912,7 +1007,10 @@ export default function Home() {
 </tr> : <tr>
 <th>日期／來源</th>
 <th>新聞標題</th>
-<th>地區／補充說明</th>
+<th>商品</th>
+<th>品牌</th>
+<th>業者角色</th>
+<th>證據／地區</th>
 <th>原文</th>
 </tr>}</thead>
 <tbody>{databaseFiltered.slice(0, 100).map((item, index) => "product" in item ? <tr key={`${item.kind}-${item.date}-${item.product}-${index}`}>
@@ -941,10 +1039,16 @@ export default function Home() {
 </td>
 <td>
 <strong>{item.title}</strong>
-{(databaseTab === "daily" || databaseTab === "manual") && <div className="news-entities"><div className="parse-badges"><span className={`parse-badge ${item.parseStatus === "parsed" ? "parsed" : "title-only"}`}>{item.parseStatus === "parsed" ? "新聞內文已解析" : item.parseStatus === "titleOnly" ? "僅取得標題" : "待補解析"}</span>{item.correctionIssueUrl && <span className="parse-badge corrected">✓ 人工核准解析修正</span>}</div>{item.products?.length || item.brands?.length ? <small>商品／品牌：{[...(item.products || []), ...(item.brands || [])].join("、")}</small> : null}{item.companies?.length ? <small>來源／相關業者：{item.companies.join("、")}</small> : null}{item.evidence?.[0] ? <small>證據句：{item.evidence[0]}</small> : null}</div>}
+{(databaseTab === "daily" || databaseTab === "manual") && <div className="parse-badges"><span className={`parse-badge ${item.parseStatus === "parsed" ? "parsed" : "title-only"}`}>{item.parseStatus === "parsed" ? "新聞內文已解析" : item.parseStatus === "titleOnly" ? "僅取得標題" : "待補解析"}</span>{item.correctionIssueUrl && <span className="parse-badge corrected">✓ 人工核准解析修正</span>}</div>}
 </td>
 <td>
-<span>{item.region || (databaseTab === "daily" ? "新聞搜尋線索" : "未提供")}</span>{item.note && <small>{item.note}</small>}</td>
+<span>{item.products?.join("、") || "未解析出商品"}</span></td>
+<td>
+<span>{item.brands?.join("、") || "未解析出品牌"}</span></td>
+<td>
+<div className="news-role-list">{item.manufacturers?.length ? <small><b>製造商</b>{item.manufacturers.join("、")}</small> : null}{item.importers?.length ? <small><b>進口商</b>{item.importers.join("、")}</small> : null}{item.suppliers?.length ? <small><b>供應／來源</b>{item.suppliers.join("、")}</small> : null}{item.retailers?.length ? <small><b>販售／通路</b>{item.retailers.join("、")}</small> : null}{otherNewsCompanies(item).length ? <small><b>其他相關業者</b>{otherNewsCompanies(item).join("、")}</small> : null}{allNewsCompanies(item).length === 0 && <span>未解析出業者</span>}</div></td>
+<td>
+<span>{item.evidence?.[0] || "未取得直接證據句"}</span><small>{item.region || (databaseTab === "daily" ? "新聞搜尋線索" : "未提供地區")}</small>{item.note && <small>{item.note}</small>}</td>
 <td>
 <a href={item.articleUrl || item.url} target="_blank" rel="noreferrer">開啟新聞原文 ↗</a>{item.issueUrl && <a href={item.issueUrl} target="_blank" rel="noreferrer">審核紀錄 ↗</a>}{(databaseTab === "daily" || databaseTab === "manual") && <button className="correction-link correction-button" onClick={() => openNewsCorrectionForm(item)}>回報新聞解析修正</button>}{(databaseTab === "daily" || databaseTab === "manual") && item.correctionIssueUrl && <a className="correction-link" href={item.correctionIssueUrl} target="_blank" rel="noreferrer">查看解析修正審核 ↗</a>}</td>
 </tr>)}</tbody>
@@ -955,7 +1059,7 @@ export default function Home() {
 <div>
 <p className="eyebrow">ADMIN REVIEW</p>
 <h2>管理審核</h2>
-<p>只有 GitHub 帳號 {GITHUB_OWNER} 可以送出核准；憑證只保留在目前頁面記憶體。</p>
+<p>只有 GitHub 帳號 {GITHUB_OWNER} 可以進行核准或拒絕；憑證只保留在目前頁面記憶體。</p>
 </div>
 <button className="database-close" onClick={closeAdmin}>關閉並清除憑證 ×</button>
 </header>
@@ -964,7 +1068,7 @@ export default function Home() {
 <section>
 <span className="source-badge manual">管理者專用</span>
 <h3>使用 GitHub 憑證驗證身分</h3>
-<p>管理頁網址仍是公開的，但沒有你的 GitHub 憑證就不能核准或更新資料。憑證不會寫入網站、資料庫或永久儲存。</p>
+<p>管理頁網址仍是公開的，但沒有你的 GitHub 憑證就不能核准、拒絕或更新資料。憑證不會寫入網站、資料庫或永久儲存。</p>
 <label htmlFor="github-admin-token">GitHub fine-grained personal access token</label>
 <div className="admin-token-row">
 <input id="github-admin-token" type="password" autoComplete="off" spellCheck={false} value={adminToken} onChange={(event) => { setAdminToken(event.target.value); setAdminError(""); }} onKeyDown={(event) => event.key === "Enter" && !adminLoading && signInAdmin()} placeholder="github_pat_..."/>
@@ -986,16 +1090,17 @@ export default function Home() {
 <div className="admin-summary">
 <div><span>登入帳號</span><strong>{adminUser}</strong><small>已通過管理者身分驗證</small></div>
 <div><span>待審核</span><strong>{adminIssues.length}</strong><small>新聞收錄、官方欄位與新聞解析修正</small></div>
-<button onClick={() => { setAdminUser(""); setAdminToken(""); setAdminIssues([]); setSelectedIssue(null); setAdminStatus(""); }}>登出並清除憑證</button>
+<button onClick={() => { setAdminUser(""); setAdminToken(""); setAdminIssues([]); setSelectedIssues([]); setRejectReason(""); setAdminStatus(""); }}>登出並清除憑證</button>
 </div>
 {adminStatus && <p className="admin-status">{adminStatus}</p>}
 {adminError && <p className="error admin-message">{adminError}</p>}
+{adminIssues.length > 0 && <div className="admin-select-tools"><button onClick={() => setSelectedIssues(adminIssues.map((issue) => issue.number))}>全選待審</button><button onClick={() => setSelectedIssues([])}>清除選取</button><span>可複選後一次核准或拒絕</span></div>}
 <div className="admin-review-list">
 {adminIssues.map((issue) => {
   const kind = reviewKind(issue);
-  return <article className={selectedIssue === issue.number ? "selected" : ""} key={issue.number}>
+  return <article className={selectedIssues.includes(issue.number) ? "selected" : ""} key={issue.number}>
 <label>
-<input type="checkbox" checked={selectedIssue === issue.number} onChange={() => { setSelectedIssue(selectedIssue === issue.number ? null : issue.number); setAdminError(""); }}/>
+<input type="checkbox" checked={selectedIssues.includes(issue.number)} onChange={() => toggleSelectedIssue(issue.number)}/>
 <span className={`review-kind ${kind}`}>{kind === "correction" ? "欄位修正" : kind === "newsCorrection" ? "新聞解析修正" : "新聞線索"}</span>
 <span className="review-number">#{issue.number}</span>
 </label>
@@ -1006,7 +1111,7 @@ export default function Home() {
 })}
 {adminIssues.length === 0 && <div className="admin-empty"><strong>目前沒有待審核案件</strong><span>新的新聞線索、官方欄位修正或新聞解析修正送出後，會顯示在這裡。</span></div>}
 </div>
-{adminIssues.length > 0 && <div className="admin-approve-bar"><div><b>{selectedIssue ? `已選擇 #${selectedIssue}` : "請勾選一件案件"}</b><small>核准前請先開啟原始來源，確認產品、業者、日期與事件內容。</small></div><button className="primary" disabled={!selectedIssue || adminLoading} onClick={approveSelectedIssue}>{adminLoading ? "送出中…" : "確認核准並更新網站"}</button></div>}
+{adminIssues.length > 0 && <div className="admin-approve-bar"><div className="admin-selection-summary"><b>{selectedIssues.length ? `已選擇 ${selectedIssues.length} 筆案件` : "請勾選至少一件案件"}</b><small>核准前請逐一核對原始來源；拒絕不會寫入資料庫或重新發布網站。</small></div><label className="admin-reject-reason"><span>拒絕原因（選填）</span><input value={rejectReason} onChange={(event) => setRejectReason(event.target.value)} placeholder="例如：與食安違規無關、資料重複"/></label><div className="admin-decision-actions"><button className="reject" disabled={!selectedIssues.length || adminLoading} onClick={rejectSelectedIssues}>{adminLoading ? "處理中…" : "拒絕並關閉"}</button><button className="primary" disabled={!selectedIssues.length || adminLoading} onClick={approveSelectedIssues}>{adminLoading ? "處理中…" : `同意並更新${selectedIssues.length > 1 ? `（${selectedIssues.length} 筆）` : ""}`}</button></div></div>}
 </>}
 </div>
 </section>}
@@ -1103,11 +1208,11 @@ export default function Home() {
 </div>
 <div>
 <dt>內文解析</dt>
-<dd>能讀取原文時，另存商品、品牌、來源／相關業者及短證據句；遇到網站阻擋或無法讀取時標示「僅取得標題」，不推測缺少內容</dd>
+<dd>能讀取原文時，分別保存商品、品牌、製造商、進口商、供應／來源業者、販售／通路及其他相關業者；只有原文明確標示角色時才分類，角色不明時不猜測</dd>
 </div>
 <div>
 <dt>人工修正</dt>
-<dd>若商品、品牌、相關業者或證據句解析錯誤，可由使用者回報、管理者核准；修正會在每日更新後重新套用並保留原始解析結果</dd>
+<dd>若商品、品牌、業者角色或證據句解析錯誤，可由使用者回報、管理者核准；修正會在每日更新後重新套用並保留原始解析結果</dd>
 </div>
 </dl>
 <a href={GOOGLE_NEWS_URL} target="_blank" rel="noreferrer">開啟 Google 新聞 ↗</a>
@@ -1122,7 +1227,7 @@ export default function Home() {
 </div>
 <div>
 <dt>核准方式</dt>
-<dd>管理者在管理審核頁核對原文後核准；系統立即解析商品、品牌、相關業者與證據句，再寫入共用資料</dd>
+<dd>管理者在管理審核頁核對原文後核准；系統立即解析商品、品牌、製造商、進口商、供應商、販售商、其他相關業者與證據句，再寫入共用資料</dd>
 </div>
 <div>
 <dt>解析重試</dt>

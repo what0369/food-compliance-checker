@@ -13,7 +13,7 @@ const MANUAL_NEWS_FILE = new URL("../public/data/manual-news.json", import.meta.
 const OFFICIAL_FILE = new URL("../public/data/official.json", import.meta.url);
 const RISK_TERMS = ["違規", "裁罰", "誇大", "下架", "不合格", "回收", "處分", "遭罰", "開罰"];
 const ARTICLE_PARSE_LIMIT = 60;
-export const NEWS_PARSE_VERSION = 4;
+export const NEWS_PARSE_VERSION = 5;
 const COMPANY_SUFFIX = "(?:股份有限公司|有限公司|企業社|商行|商號|油行|油廠|食品廠|工廠|合作社|農場|實業|企業|公司)";
 
 const value = (row, key) => String(row[key] ?? "").trim();
@@ -132,12 +132,27 @@ async function fetchArticle(url) {
   } finally { clearTimeout(timer); }
 }
 
-function extractEntities(title, articleText) {
+export function extractEntities(title, articleText) {
   const text = `${title}。${articleText}`.replace(/\s+/g, " ");
+  const extractRoleCompanies = (labels, limit = 10) => uniqueText(
+    [...text.matchAll(new RegExp(`(?:${labels.join("|")})(?:名稱)?(?:為|是|包括|包含)?[：:、，,\\s「『]*(.{1,28}?${COMPANY_SUFFIX})`, "g"))]
+      .map((match) => match[1].replace(/^[為是「『（(、，,：:\s]+|[」』）)、，,。；;：:\s]+$/g, "")),
+    limit,
+  );
+  const manufacturers = extractRoleCompanies(["受託製造商", "製造商", "製造業者", "製造廠", "生產商", "代工廠"]);
+  const importers = extractRoleCompanies(["進口商", "輸入業者"]);
+  const suppliers = extractRoleCompanies(["原料來源業者", "油品來源業者", "供應商", "來源業者"]);
+  const retailers = extractRoleCompanies(["販售業者", "販售商", "銷售商", "通路商", "販售通路"]);
   const companies = uniqueText([
-    ...[...text.matchAll(new RegExp(`(?:製造商|製造業者|進口商|供應商|來源業者|原料來源|油品來源|販售業者|業者|委製商|委託|出品)(?:為|是)?[：:、，,\\s「『]*(.{2,28}?${COMPANY_SUFFIX})`, "g"))].map((match) => match[1]),
+    ...manufacturers,
+    ...importers,
+    ...suppliers,
+    ...retailers,
+    ...[...text.matchAll(new RegExp(`(?:製造商|製造業者|進口商|供應商|來源業者|原料來源|油品來源|販售業者|業者|委製商|委託|出品)(?:為|是)?[：:、，,\\s「『]*(.{1,28}?${COMPANY_SUFFIX})`, "g"))].map((match) => match[1]),
     ...[...text.matchAll(new RegExp(`(?:^|[「『（(、，,；;。：:\\s])([\p{Script=Han}A-Za-z0-9．・&（）()\-]{2,20}${COMPANY_SUFFIX})`, "gu"))].map((match) => match[1]),
   ].map((item) => item.replace(/^[為是「『（(、，,：:\s]+|[」』）)、，,。；;：:\s]+$/g, "")), 15);
+  const roleCompanyKeys = new Set([...manufacturers, ...importers, ...suppliers, ...retailers].map(compact));
+  const otherCompanies = companies.filter((company) => !roleCompanyKeys.has(compact(company)));
   const labelledProducts = [...text.matchAll(/(?:產品名稱|商品名稱|不合格品項|下架品項|回收品項|抽驗品項|產品|商品|品名)[為是：:\s「『]*([^。；;，,]{2,45}?)(?=\s*(?:產品名稱|商品名稱|品牌名稱|品牌|牌名|製造商|進口商|業者)[為是：:]|[。；;，,]|$)/g)].map((match) => match[1]);
   const quotedProducts = [...text.matchAll(/[「『]([^」』]{2,35})[」』]/g)].filter((match) => {
     const nearby = text.slice(Math.max(0, (match.index || 0) - 100), (match.index || 0) + match[0].length + 100);
@@ -149,7 +164,7 @@ function extractEntities(title, articleText) {
   const sentences = text.split(/(?<=[。！？!?；;])\s*/).map((item) => item.trim()).filter((item) => item.length >= 12 && item.length <= 260);
   const names = [...companies, ...products, ...brands];
   const evidence = uniqueText(sentences.filter((sentence) => RISK_TERMS.some((term) => sentence.includes(term)) && (names.length === 0 || names.some((name) => sentence.includes(name)))).map((sentence) => sentence.slice(0, 220)), 3);
-  return { products, companies, brands, evidence };
+  return { products, brands, companies, manufacturers, importers, suppliers, retailers, otherCompanies, evidence };
 }
 
 export async function enrichNewsItem(item) {

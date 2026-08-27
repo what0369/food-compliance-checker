@@ -1,4 +1,23 @@
 {
-  "updatedAt": "",
-  "items": []
+  "updatedAt": "2026-08-27T02:16:11.239Z",
+  "items": [
+    {
+      "id": "0e044594c49b8312",
+      "sourceUrl": "https://www.fda.gov.tw/tc/csmnewsContent.aspx?mid=267&id=t634609",
+      "match": {
+        "date": "2026-08-19",
+        "product": "有關信義鄉農會代工苦茶油自主送驗檢出苯駢芘超標案",
+        "company": "該農會委託彰化再源油品公司",
+        "manufacturer": ""
+      },
+      "set": {
+        "product": "苦茶油",
+        "company": "信義鄉農會",
+        "manufacturer": "再源油品公司"
+      },
+      "reason": "請說明哪一段被多抓、漏抓或欄位放錯。",
+      "issueUrl": "https://github.com/what0369/food-compliance-checker/issues/4",
+      "approvedAt": "2026-08-27T02:16:11.236Z"
+    }
+  ]
 }

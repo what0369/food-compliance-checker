@@ -29,6 +29,7 @@ const GOOGLE_NEWS_URL = "https://news.google.com/home?hl=zh-TW&gl=TW&ceid=TW:zh-
 const LOCAL_HEALTH_URL = "https://service.mohw.gov.tw/HealthCenter/";
 const HEALTH_NEWS_URL = "https://www.fda.gov.tw/tc/csmnews.aspx";
 const NEW_ISSUE_URL = "https://github.com/what0369/food-compliance-checker/issues/new";
+const ANONYMOUS_NEWS_URL = "https://script.google.com/macros/s/AKfycbz1VZ1mwm4Q-6r6DdXcaR0kp51iGLmg-0PjmXv98Ok02uDaz_uxhy5B-ND66l0w5XM/exec";
 const ISSUES_URL = "https://github.com/what0369/food-compliance-checker/issues";
 const ADMIN_HASH = "#/admin-review";
 const GITHUB_OWNER = "what0369";
@@ -457,33 +458,38 @@ export default function Home() {
     const sheet = XLSX.utils.json_to_sheet(results.map((item) => ({ "快速查核關鍵字": item.keyword || "", "產品名稱": item.product, "品牌": item.brand, "供應商": item.supplier, "製造商／進口商": item.manufacturer, "統編（選填）": item.taxId, "查核狀態": item.status, "查核期間命中筆數": item.count, "最新日期": item.latest, "證據關聯理由": item.evidence.map((e) => e.basis).join("｜"), "官方紀錄產品": item.evidence.map((e) => e.recordProduct || "").filter(Boolean).join("｜"), "官方紀錄業者": item.evidence.map((e) => e.recordCompany || "").filter(Boolean).join("｜"), "處分法條／原因": item.evidence.map((e) => e.reason || "").filter(Boolean).join("｜"), "證據標題": item.evidence.map((e) => e.title).join("｜"), "證據網址": item.evidence.map((e) => e.url).join("｜"), "官方人工搜尋": searchUrl("official", item.query), "新聞人工搜尋": searchUrl("news", item.query), "備註": item.note })));
     const book = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(book, sheet, "查核結果"); XLSX.writeFile(book, `年度制免費自動查核結果_${localDate(new Date())}.xlsx`);
   }
-  function buildNewsIssue() {
+  function validatedNewsSubmission() {
     const data = { url: clean(newsSubmission.url), note: clean(newsSubmission.note) };
     if (!data.url || !data.note) throw new Error("請貼上新聞網址，並填寫產品、品牌或事件說明。");
     let parsed: URL;
     try { parsed = new URL(data.url); if (!/^https?:$/.test(parsed.protocol)) throw new Error(); } catch { throw new Error("請輸入完整的 http 或 https 新聞網址。"); }
-    const source = parsed.hostname.replace(/^www\./, "");
-    const date = new Date().toISOString().slice(0, 10);
-    const title = data.note.split(/\r?\n/).find(Boolean)?.slice(0, 80) || `新聞線索（${source}）`;
-    const safeNote = data.note.replace(/^## /gm, "＃＃ ").slice(0, 1500);
-    const body = [`## 新聞標題`, title, ``, `## 新聞網址`, data.url, ``, `## 發布日期`, date, ``, `## 地區／主管機關`, `待確認`, ``, `## 新聞來源`, source, ``, `## 補充說明`, safeNote, ``, `---`, `系統已由網址自動整理來源及提交日期。管理者核准後會立即解析新聞內文；若原站暫時無法讀取，系統會標示僅取得標題並在每日更新時重試。`].join("\n");
-    const params = new URLSearchParams({ title: `新聞線索：${title}`, body });
-    return { body, url: `${NEW_ISSUE_URL}?${params.toString()}` };
+    return { url: parsed.toString(), note: data.note.slice(0, 1500) };
   }
   function submitNewsForReview() {
     try {
-      const issue = buildNewsIssue();
-      window.open(issue.url, "_blank", "noopener,noreferrer");
-      navigator.clipboard?.writeText(issue.body).then(
-        () => setNewsSubmitStatus("已開啟 GitHub，送審內容也已複製。若 GitHub 顯示 500，請回來按「開啟空白 Issue」後直接貼上。"),
-        () => setNewsSubmitStatus("已開啟 GitHub。若顯示 500，請回來先按「複製送審內容」，再開啟空白 Issue。"),
-      );
+      const data = validatedNewsSubmission();
+      const target = `anonymous-news-submit-${Date.now()}`;
+      const resultWindow = window.open("about:blank", target);
+      if (!resultWindow) throw new Error("瀏覽器阻擋送審結果頁，請允許此網站開啟彈出式視窗後重試。");
+      resultWindow.opener = null;
+      const form = document.createElement("form");
+      form.method = "post";
+      form.action = ANONYMOUS_NEWS_URL;
+      form.target = target;
+      form.style.display = "none";
+      for (const [name, value] of Object.entries({ url: data.url, note: data.note, website: "" })) {
+        const input = document.createElement("input");
+        input.type = "hidden";
+        input.name = name;
+        input.value = value;
+        form.appendChild(input);
+      }
+      document.body.appendChild(form);
+      form.submit();
+      form.remove();
+      setNewsSubmitStatus("已送往匿名審核入口；新分頁會顯示送出結果。管理者核准前不會納入資料庫。");
       setError("");
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "無法開啟 GitHub 送審頁面。"); }
-  }
-  async function copyNewsIssue() {
-    try { await navigator.clipboard.writeText(buildNewsIssue().body); setNewsSubmitStatus("送審內容已複製；請開啟空白 Issue，貼上後送出。"); setError(""); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : "瀏覽器無法複製內容，請手動複製表單文字。"); }
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "目前無法使用匿名送審服務。"); }
   }
 
   function openCorrectionForm(item: OfficialItem) {
@@ -787,9 +793,9 @@ export default function Home() {
 </label>
 <label>補充說明<textarea value={newsSubmission.note} onChange={(e) => { setNewsSubmission({ ...newsSubmission, note: e.target.value }); setError(""); }} placeholder="例如：奧利塔就是 Olitalia；2 款橄欖油含礦物油。請寫出產品、品牌、別名或違規事件。"/>
 </label>
-</div>{error && <p className="error modal-error">{error}</p>}<button className="primary analyze" disabled={!newsSubmission.url.trim() || !newsSubmission.note.trim()} onClick={submitNewsForReview}>前往 GitHub 送出審核</button>
-{newsSubmitStatus && <div className="github-fallback"><p>{newsSubmitStatus}</p><div><button onClick={copyNewsIssue}>複製送審內容</button><a href={NEW_ISSUE_URL} target="_blank" rel="noreferrer">開啟空白 Issue ↗</a></div></div>}
-<p className="github-note">需要登入免費 GitHub 帳號。管理者在管理審核頁核准後，網站會解析內文並自動更新；暫時讀不到原文時會於每日更新重試。</p>
+</div>{error && <p className="error modal-error">{error}</p>}<button className="primary analyze" disabled={!newsSubmission.url.trim() || !newsSubmission.note.trim()} onClick={submitNewsForReview}>匿名送出審核（免登入）</button>
+{newsSubmitStatus && <div className="github-fallback"><p>{newsSubmitStatus}</p></div>}
+<p className="github-note">提交者不需要任何帳號。送出後只會建立待審核線索；管理者核准後才解析內文並更新網站。</p>
 </section>
 </div>}
     {correctionItem && <div className="modal-backdrop correction-modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && closeCorrectionForm()}>

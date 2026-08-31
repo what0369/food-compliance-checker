@@ -1,4 +1,5 @@
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
+import { readSource, SourceError, failureInfo, failureSummary } from './source-fetch.mjs';
 
 const NEW_TAIPEI_API = "https://data.ntpc.gov.tw/api/datasets/078cb722-15ac-4e1e-b541-e75bfe0aa440/json?page=0&size=10000";
 const NEW_TAIPEI_SOURCE = "https://www.health.ntpc.gov.tw/basic/?node=19348";
@@ -22,12 +23,7 @@ const hasRisk = (value) => RISK_TERMS.some((term) => compact(value).includes(com
 const isFoodRiskTitle = (value) => hasRisk(value) && FOOD_TERMS.some((term) => compact(value).includes(compact(term)))
   && (!/(全數|全部|均|皆)合格/.test(value) || /不合格|不符|超標/.test(value));
 
-async function fetchResponse(url, timeout = 30_000) {
-  const response = await fetch(url, { headers: { "User-Agent": "food-compliance-checker/1.0" }, signal: AbortSignal.timeout(timeout) });
-  if (!response.ok) throw new Error(`${url} 回應 HTTP ${response.status}`);
-  return response;
-}
-const fetchText = async (url) => (await fetchResponse(url)).text();
+const fetchText = async (url) => readSource(url, { timeout: 20_000 });
 const fetchJson = async (url) => JSON.parse(await fetchText(url));
 
 function absoluteLinks(html, baseUrl, pattern = /\.pdf(?:$|[?#])/i) {
@@ -136,10 +132,11 @@ export function recordsFromDocument(body, metadata) {
 }
 
 export async function extractPdfText(url) {
-  const response = await fetchResponse(url, 45_000);
-  const data = new Uint8Array(await response.arrayBuffer());
-  if (data.byteLength > 25 * 1024 * 1024) throw new Error("PDF 超過 25 MB 上限");
-  const document = await getDocument({ data, disableWorker: true, isEvalSupported: false }).promise;
+  const data = await readSource(url, { timeout: 30_000, binary: true });
+  if (data.byteLength > 25 * 1024 * 1024) throw new SourceError('attachment', "PDF 超過 25 MB 上限");
+  let document;
+  try { document = await getDocument({ data, disableWorker: true, isEvalSupported: false }).promise; }
+  catch { throw new SourceError('attachment', '附件不是可讀取的 PDF'); }
   const pages = [];
   try {
     for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
@@ -162,8 +159,11 @@ export async function extractPdfText(url) {
         }, "");
       }).join("\n"));
     }
-  } finally { await document.destroy(); }
-  return pages.join("\n\f\n");
+  } catch { throw new SourceError('attachment', 'PDF 文字解析失敗'); }
+  finally { await document.destroy(); }
+  const body = pages.join("\n\f\n");
+  if (!body.trim()) throw new SourceError('attachment', 'PDF 沒有可讀文字，需人工確認或文字辨識');
+  return body;
 }
 
 function newTaipeiDate(item) {
@@ -182,7 +182,7 @@ async function parseNewTaipeiItem(item) {
     body = stripHtml(main);
     pdfs = absoluteLinks(main || html, sourceUrl);
   }
-  if (!body && !pdfs.length) throw new Error("公告頁未提供可解析正文或 PDF");
+  if (!body && !pdfs.length) throw new SourceError('parse', "公告頁未提供可解析正文或 PDF");
   const records = [];
   if (hasRisk(body)) records.push(...recordsFromDocument(body, { title, date, authority: "新北市政府衛生局", city: "新北市", sourceLayer: "新北市衛生局公告／PDF", url: sourceUrl }));
   for (const pdf of pdfs) {
@@ -223,7 +223,7 @@ async function newTaipeiNewsItems(now, since) {
 
 async function parseNewTaipeiNewsItem(item) {
   const detail = parseNewTaipeiNewsDetail(await fetchText(item.url), item);
-  if (!detail.body && !detail.pdfs.length) throw new Error("新聞公告未提供可解析正文或 PDF");
+  if (!detail.body && !detail.pdfs.length) throw new SourceError('parse', "新聞公告未提供可解析正文或 PDF");
   const combined = [detail.body];
   for (const pdf of detail.pdfs) combined.push(await extractPdfText(pdf.url));
   const parsed = recordsFromDocument(combined.join("\n\f\n"), { title: detail.title, date: detail.date, authority: "新北市政府衛生局", city: "新北市", sourceLayer: "新北市衛生局公告／PDF", url: item.url, attachmentUrl: detail.pdfs.map((pdf) => pdf.url).join("｜") });
@@ -248,21 +248,76 @@ export function parseKaohsiungDetail(html, fallback) {
   return { title, date, body: text(`${stripHtml(bodyHtml)}\n${imageText}`), pdfs: absoluteLinks(html, fallback.url) };
 }
 
+const announcementKey = title => compact(title).replace(/^新北市政府衛生局食品抽驗名冊/, '').replace(/名冊$/, '');
+
+export function exactReplacement(original, candidates) {
+  const matches = candidates.filter(candidate => {
+    try {
+      const url = new URL(candidate.url);
+      return url.origin === 'https://www.health.ntpc.gov.tw' && /^\/(?:article|news)\//.test(url.pathname)
+        && url.href !== new URL(original.url).href && candidate.date === original.date
+        && announcementKey(candidate.title) === announcementKey(original.title);
+    } catch { return false; }
+  });
+  const unique = [...new Map(matches.map(item => [new URL(item.url).href, item])).values()];
+  return unique.length === 1 ? unique[0] : null;
+}
+
+export function replaceAnnouncement(records, originalUrl, replacements) {
+  // 同一公告的新結果取代舊失敗標記；其他公告及人工核准資料不動。
+  const urls = new Set([originalUrl, ...replacements.map(item => item.url)]);
+  const retained = replacements.every(item => item.parseStatus === 'failed')
+    ? records.filter(item => urls.has(item.url) && item.parseStatus !== 'failed').map(item => ({ ...item, retainedFromPrevious: true })) : [];
+  return [...records.filter(item => !urls.has(item.url) && item.originalUrl !== originalUrl), ...retained, ...replacements];
+}
+
+function failedAnnouncement(item, error, city) {
+  const failure = failureInfo(error);
+  const next = failure.code === 'missing' ? '未確認同一公告的新網址，保留待確認，不作違規判定' : '下次更新會重試；未取得資料仍待確認';
+  return { kind: '地方衛生局官方食安事件', product: item.title, company: '', manufacturer: '', date: item.date, authority: `${city}政府衛生局`, reason: `${failure.label}；${next}`, action: '', url: item.url, city, sourceLayer: `${city}衛生局公告／PDF`, media: item.title, parseStatus: 'failed', parseVersion: LOCAL_PARSE_VERSION, matchable: false, failureCode: failure.code, parseMessage: failure.label };
+}
+
+async function recoverNewTaipei(item, candidates, searchCache) {
+  let candidate = exactReplacement(item, candidates);
+  if (!candidate) {
+    const params = new URLSearchParams({ keywords: item.title, mode: 'search', language: 'tw' });
+    if (!searchCache.has(item.title)) searchCache.set(item.title, fetchText(`${NEW_TAIPEI_NEWS}?${params}`).then(parseNewTaipeiNewsList).catch(() => []));
+    candidate = exactReplacement(item, await searchCache.get(item.title));
+  }
+  if (!candidate) return null;
+  // 再讀候選正文核對日期及標題，不能只靠搜尋結果相似就改網址。
+  const detail = parseNewTaipeiNewsDetail(await fetchText(candidate.url), { title: '', date: '', url: candidate.url });
+  if (detail.date !== item.date || announcementKey(detail.title) !== announcementKey(item.title)) return null;
+  const parsed = new URL(candidate.url).pathname.startsWith('/news/')
+    ? await parseNewTaipeiNewsItem(candidate)
+    : await parseNewTaipeiItem({ filename: candidate.title, date: candidate.date, domainname: candidate.url });
+  return parsed.map(record => ({ ...record, originalUrl: item.url, recoveryNote: '已核對官方公告標題與發布日期，更新原失效網址' }));
+}
+
 async function collectNewTaipei(now, since, previousRecords) {
-  const items = (await fetchJson(NEW_TAIPEI_API)).filter((item) => inPeriod(newTaipeiDate(item), since, now));
-  const newsItems = await newTaipeiNewsItems(now, since);
+  const lists = await Promise.allSettled([fetchJson(NEW_TAIPEI_API), newTaipeiNewsItems(now, since)]);
+  const listFailures = lists.flatMap((result, index) => result.status === 'rejected' ? [{ url: index ? NEW_TAIPEI_NEWS : NEW_TAIPEI_API, ...failureInfo(result.reason) }] : []);
+  const items = lists[0].status === 'fulfilled' ? lists[0].value.filter(item => inPeriod(newTaipeiDate(item), since, now)) : [];
+  const newsItems = lists[1].status === 'fulfilled' ? lists[1].value : [];
   const successful = new Set(previousRecords.filter((item) => item.sourceLayer === "新北市衛生局公告／PDF" && item.parseVersion === LOCAL_PARSE_VERSION && item.parseStatus !== "failed").map((item) => item.url));
-  const records = previousRecords.filter((item) => item.sourceLayer === "新北市衛生局公告／PDF" && item.parseVersion === LOCAL_PARSE_VERSION && inPeriod(item.date, since, now));
-  let failed = 0;
-  for (const item of items.filter((candidate) => !successful.has(candidate.domainname))) {
-    try { records.push(...await parseNewTaipeiItem(item)); }
-    catch { failed += 1; records.push({ kind: "地方衛生局官方食安事件", product: item.filename, company: "", manufacturer: "", date: newTaipeiDate(item), authority: "新北市政府衛生局", reason: "公告或 PDF 暫時無法解析，下次更新將重試", action: "", url: item.domainname, city: "新北市", sourceLayer: "新北市衛生局公告／PDF", media: item.filename, parseStatus: "failed", parseVersion: LOCAL_PARSE_VERSION, matchable: false }); }
+  let records = previousRecords.filter(item => item.sourceLayer === '新北市衛生局公告／PDF' && inPeriod(item.date, since, now));
+  for (const record of records) if (record.parseStatus !== 'failed' && record.originalUrl) successful.add(record.originalUrl);
+  for (const record of records) if (record.parseStatus === 'failed') successful.delete(record.url);
+  const candidates = [...items.map(item => ({ title: item.filename, date: newTaipeiDate(item), url: item.domainname, api: item })), ...newsItems];
+  // 即使清單暫時漏列，之前失敗的公告仍保留在重試佇列。
+  for (const record of records.filter(item => item.parseStatus === 'failed')) if (!candidates.some(item => item.url === record.url)) candidates.push({ title: record.media || record.product, date: record.date, url: record.url, api: { filename: record.media || record.product, date: record.date, domainname: record.url } });
+  const searchCache = new Map();
+  for (const item of [...new Map(candidates.map(item => [item.url, item])).values()].filter(item => !successful.has(item.url))) {
+    try {
+      const parsed = item.api ? await parseNewTaipeiItem(item.api) : await parseNewTaipeiNewsItem(item);
+      records = replaceAnnouncement(records, item.url, parsed);
+    } catch (error) {
+      const recovered = failureInfo(error).code === 'missing' ? await recoverNewTaipei(item, candidates, searchCache).catch(() => null) : null;
+      records = replaceAnnouncement(records, item.url, recovered || [failedAnnouncement(item, error, '新北市')]);
+    }
   }
-  for (const item of newsItems.filter((candidate) => !successful.has(candidate.url))) {
-    try { records.push(...await parseNewTaipeiNewsItem(item)); }
-    catch { failed += 1; records.push({ kind: "地方衛生局官方食安事件", product: item.title, company: "", manufacturer: "", date: item.date, authority: "新北市政府衛生局", reason: "公告或 PDF 暫時無法解析，下次更新將重試", action: "", url: item.url, city: "新北市", sourceLayer: "新北市衛生局公告／PDF", media: item.title, parseStatus: "failed", parseVersion: LOCAL_PARSE_VERSION, matchable: false }); }
-  }
-  return { records, source: { city: "新北市", datasetUrl: NEW_TAIPEI_SOURCE, mode: "公告與 PDF 內文自動解析", status: failed ? "部分內容取得失敗" : "已連線", recordCount: records.filter((item) => item.matchable !== false).length, message: failed ? `${failed} 份公告或 PDF 解析失敗；下次每日更新會重試` : undefined } };
+  const failures = [...listFailures, ...records.filter(item => item.parseStatus === 'failed').map(item => ({ url: item.url, code: item.failureCode || 'parse', label: item.parseMessage || '資料格式無法解析' }))];
+  return { records, source: { city: '新北市', datasetUrl: NEW_TAIPEI_NEWS, mode: '公告與 PDF 內文自動解析', status: failures.length ? '部分內容取得失敗' : '已連線', recordCount: records.filter(item => item.matchable !== false).length, failures, message: failures.length ? `${failureSummary(failures)}；已成功收錄的資料保留，未取得資料仍待確認` : undefined } };
 }
 
 async function collectKaohsiung(now, since, previousRecords) {
@@ -278,17 +333,23 @@ async function collectKaohsiung(now, since, previousRecords) {
   }
   const candidates = [...new Map(listItems.filter((item) => inPeriod(item.date, since, now) && isFoodRiskTitle(item.title)).map((item) => [item.url, item])).values()];
   const successful = new Set(previousRecords.filter((item) => item.sourceLayer === "高雄市衛生局公告／PDF" && item.parseVersion === LOCAL_PARSE_VERSION && item.parseStatus !== "failed").map((item) => item.url));
-  const records = previousRecords.filter((item) => item.sourceLayer === "高雄市衛生局公告／PDF" && item.parseVersion === LOCAL_PARSE_VERSION && inPeriod(item.date, since, now));
+  let records = previousRecords.filter((item) => item.sourceLayer === "高雄市衛生局公告／PDF" && inPeriod(item.date, since, now));
+  for (const record of records.filter(item => item.parseStatus === 'failed')) {
+    successful.delete(record.url);
+    if (!candidates.some(item => item.url === record.url)) candidates.push({ title: record.media || record.product, date: record.date, url: record.url });
+  }
   let failedDetails = 0;
   for (const item of candidates.filter((candidate) => !successful.has(candidate.url))) {
     try {
       const detail = parseKaohsiungDetail(await fetchText(item.url), item);
+      if (!detail.body && !detail.pdfs.length) throw new SourceError('parse', '公告缺少正文或 PDF');
       const combined = [detail.body];
       for (const pdf of detail.pdfs) combined.push(await extractPdfText(pdf.url));
       const parsed = recordsFromDocument(combined.join("\n\f\n"), { title: detail.title, date: detail.date, authority: "高雄市政府衛生局", city: "高雄市", sourceLayer: "高雄市衛生局公告／PDF", url: item.url, attachmentUrl: detail.pdfs.map((pdf) => pdf.url).join("｜") });
-      records.push(...(parsed.length ? parsed : [checkpoint({ title: detail.title, date: detail.date, authority: "高雄市政府衛生局", city: "高雄市", sourceLayer: "高雄市衛生局公告／PDF", url: item.url })]));
-    } catch { failedDetails += 1; records.push({ kind: "地方衛生局官方食安事件", product: item.title, company: "", manufacturer: "", date: item.date, authority: "高雄市政府衛生局", reason: "公告或 PDF 暫時無法解析，下次更新將重試", action: "", url: item.url, city: "高雄市", sourceLayer: "高雄市衛生局公告／PDF", media: item.title, parseStatus: "failed", parseVersion: LOCAL_PARSE_VERSION, matchable: false }); }
+      records = replaceAnnouncement(records, item.url, parsed.length ? parsed : [checkpoint({ title: detail.title, date: detail.date, authority: "高雄市政府衛生局", city: "高雄市", sourceLayer: "高雄市衛生局公告／PDF", url: item.url })]);
+    } catch (error) { failedDetails += 1; records = replaceAnnouncement(records, item.url, [failedAnnouncement(item, error, '高雄市')]); }
   }
+  failedDetails = records.filter(item => item.parseStatus === 'failed').length;
   const failed = failedLists + failedDetails;
   return { records, source: { city: "高雄市", datasetUrl: KAOHSIUNG_LIST, mode: "公告與 PDF 內文自動解析", status: failed ? "部分內容取得失敗" : "已連線", recordCount: records.filter((item) => item.matchable !== false).length, message: failed ? `清單失敗 ${failedLists} 頁、公告或 PDF 失敗 ${failedDetails} 篇；下次每日更新會重試` : undefined } };
 }
@@ -299,5 +360,9 @@ export async function collectLocalAnnouncements(now, since, previousRecords = []
     { city: "新北市", datasetUrl: NEW_TAIPEI_SOURCE, mode: "公告與 PDF 內文自動解析" },
     { city: "高雄市", datasetUrl: KAOHSIUNG_LIST, mode: "公告與 PDF 內文自動解析" },
   ];
-  return results.map((result, index) => result.status === "fulfilled" ? result.value : { records: previousRecords.filter((item) => item.sourceLayer === `${fallbackSources[index].city}衛生局公告／PDF` && item.parseVersion === LOCAL_PARSE_VERSION && inPeriod(item.date, since, now)), source: { ...fallbackSources[index], status: "本次更新失敗", recordCount: 0, message: result.reason instanceof Error ? result.reason.message : String(result.reason) } });
+  return results.map((result, index) => {
+    if (result.status === 'fulfilled') return result.value;
+    const records = previousRecords.filter(item => item.sourceLayer === `${fallbackSources[index].city}衛生局公告／PDF` && inPeriod(item.date, since, now));
+    return { records, source: { ...fallbackSources[index], status: '本次更新失敗', recordCount: records.filter(item => item.matchable !== false).length, message: `${failureInfo(result.reason).label}；保留上次成功資料，未取得資料仍待確認` } };
+  });
 }

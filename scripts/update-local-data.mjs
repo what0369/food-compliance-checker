@@ -2,6 +2,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { collectHealthBureauNews } from "./update-health-news.mjs";
 import { collectLocalAnnouncements } from "./update-local-announcements.mjs";
 import { applyLocalCorrections, loadLocalCorrections } from "./local-corrections.mjs";
+import { readSource, SourceError, settleResources, preserveFailedResources, failureInfo, failureSummary } from "./source-fetch.mjs";
 
 const OUTPUT = new URL("../public/data/local-official.json", import.meta.url);
 const DATASETS = {
@@ -36,14 +37,20 @@ function parseCsv(input) {
   return rows.map((values) => Object.fromEntries(headers.map((header, index) => [header, values[index] ?? ""])));
 }
 
+function checkedCsv(input) {
+  const rows = parseCsv(input);
+  if (!/產品名稱|檢體名稱|品名|物品名稱/.test(input.split(/\r?\n/)[0]) || /^\s*</.test(input)) throw new SourceError('parse', 'CSV 欄位不符或回傳網頁');
+  return rows;
+}
+
 function parseDate(input) {
   const value = text(input).replace(/[年月.／]/g, "/").replace(/日/g, "").replace(/-/g, "/");
   const compactDate = value.match(/^(\d{3})(\d{2})(\d{2})$/);
-  if (compactDate) return new Date(Number(compactDate[1]) + 1911, Number(compactDate[2]) - 1, Number(compactDate[3]));
+  if (compactDate) return new Date(Date.UTC(Number(compactDate[1]) + 1911, Number(compactDate[2]) - 1, Number(compactDate[3])));
   const roc = value.match(/^(\d{2,3})\/(\d{1,2})\/(\d{1,2})/);
-  if (roc && Number(roc[1]) < 1911) return new Date(Number(roc[1]) + 1911, Number(roc[2]) - 1, Number(roc[3]));
+  if (roc && Number(roc[1]) < 1911) return new Date(Date.UTC(Number(roc[1]) + 1911, Number(roc[2]) - 1, Number(roc[3])));
   const western = value.match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})/);
-  if (western) return new Date(Number(western[1]), Number(western[2]) - 1, Number(western[3]));
+  if (western) return new Date(Date.UTC(Number(western[1]), Number(western[2]) - 1, Number(western[3])));
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
@@ -52,9 +59,7 @@ const isoDate = (value) => parseDate(value)?.toISOString().slice(0, 10) || "";
 const within = (value, since, now) => { const date = parseDate(value); return Boolean(date && date >= since && date <= now); };
 
 async function fetchText(url) {
-  const response = await fetch(url, { headers: { "User-Agent": "food-compliance-checker/1.0" }, signal: AbortSignal.timeout(15_000) });
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  return response.text();
+  return readSource(url);
 }
 
 async function fetchJson(url) { return JSON.parse(await fetchText(url)); }
@@ -96,22 +101,35 @@ function record(city, row, sourceUrl) {
 
 async function csvDataset(city, datasetUrl, since, now, maxFiles = 18) {
   const urls = (await distributionUrls(datasetUrl)).slice(-maxFiles);
-  const settled = await Promise.allSettled(urls.map(async (url) => ({ url, rows: parseCsv(await fetchText(url)) })));
-  const records = settled.flatMap((result) => result.status === "fulfilled" ? result.value.rows.map((row) => record(city, row, result.value.url)) : [])
+  if (!urls.length) throw new SourceError('parse', "找不到可讀取的 CSV");
+  const result = await settleResources(urls.map(url => ({ url })), async ({ url }) => checkedCsv(await fetchText(url)).map(row => record(city, row, url)));
+  result.records = result.records
     .filter((item) => item.product && item.date && within(item.date, since, now))
     .filter((item) => !/(^|[^不未])合格/.test(item.reason) || /不合格|不符|超標|檢出/.test(item.reason));
-  if (!urls.length) throw new Error("找不到可讀取的 CSV");
-  return records;
+  return result;
 }
 
-async function tainan(since, now) {
+export async function tainan(since, now, read = fetchText) {
   const urls = [
     "https://soa.tainan.gov.tw/Api/Service/Get/e6f948cf-e7b9-4be9-9be4-f6d3992311d0",
     "https://soa.tainan.gov.tw/Api/Service/Get/51b3d901-697b-413f-95d6-105b868bcde5",
   ];
-  const payloads = await Promise.all(urls.map(fetchJson));
-  return payloads.flatMap((payload, index) => (payload.data || payload || []).map((row) => record("臺南市", row, urls[index])))
-    .filter((item) => item.product && item.date && within(item.date, since, now));
+  return settleResources(urls.map(url => ({ url })), async ({ url }) => {
+    let rows; let downloadUrl = url; let primaryFailure;
+    try {
+      const payload = JSON.parse(await read(url));
+      rows = payload.data || payload;
+      if (!Array.isArray(rows)) throw new SourceError('parse', 'JSON 未提供資料列');
+      if (rows.length && !Object.keys(rows[0]).includes('產品名稱')) throw new SourceError('parse', 'JSON 缺少產品名稱');
+    } catch (error) {
+      primaryFailure = failureInfo(error).label;
+      // 同一官方 resource ID 對應的 CSV；保留 API 作為穩定資料身分。
+      downloadUrl = `https://data.tainan.gov.tw/File/ResourceCsvDownload/${url.split('/').at(-1)}`;
+      rows = checkedCsv(await read(downloadUrl));
+    }
+    return rows.map(row => ({ ...record('臺南市', row, url), downloadUrl, ...(primaryFailure ? { fallbackReason: primaryFailure } : {}) }))
+      .filter(item => item.product && item.date && within(item.date, since, now));
+  });
 }
 
 async function taichung(since, now) {
@@ -131,23 +149,31 @@ export async function updateLocalOfficial(now = new Date()) {
     { city: "臺中市", datasetUrl: DATASETS.taichung, mode: "結構化開放資料", run: () => taichung(since, now) },
     { city: "臺南市", datasetUrl: DATASETS.tainan, mode: "結構化開放資料", run: () => tainan(since, now) },
   ];
-  const runWithLimit = (job) => Promise.race([
-    job.run(),
-    new Promise((_, reject) => setTimeout(() => reject(new Error("來源處理超過 35 秒")), 35_000)),
-  ]);
   const results = await Promise.all(jobs.map(async (job) => {
     if (!job.run) return { job, items: null };
-    try { return { job, items: await runWithLimit(job) }; }
+    // 每個請求各自有限時；不得用整批 35 秒上限丟棄已成功的季度與備援。
+    try { return { job, items: await job.run() }; }
     catch (error) { return { job, error }; }
   }));
   const records = []; const sources = [];
   for (const result of results) {
     const { job } = result;
     if (result.items === null) sources.push({ city: job.city, datasetUrl: job.datasetUrl, mode: job.mode, status: "僅供人工開啟查閱", recordCount: 0 });
-    else if (result.error) sources.push({ city: job.city, datasetUrl: job.datasetUrl, mode: job.mode, status: "本次更新失敗", recordCount: 0, message: result.error instanceof Error ? result.error.message : "未知錯誤" });
-    else { records.push(...result.items); sources.push({ city: job.city, datasetUrl: job.datasetUrl, mode: job.mode, status: "已連線", recordCount: result.items.length }); }
+    else {
+      const old = (previous.records || []).filter(item => item.city === job.city && item.sourceLayer === '地方衛生局直接資料' && within(item.date, since, now));
+      const current = result.error ? { records: [], successfulUrls: [], failures: [{ url: job.datasetUrl, ...failureInfo(result.error) }], discoveryFailed: true }
+        : Array.isArray(result.items) ? { records: result.items, successfulUrls: [...new Set(result.items.map(item => item.url))], failures: [] } : result.items;
+      const merged = preserveFailedResources(current, old, now, previous.updatedAt);
+      records.push(...merged.records);
+      const fallbackCount = new Set(current.records.filter(item => item.fallbackReason).map(item => item.url)).size;
+      sources.push({ city: job.city, datasetUrl: job.datasetUrl, mode: job.mode, status: current.failures.length ? current.successfulUrls.length ? '部分內容取得失敗' : '本次更新失敗' : fallbackCount ? '已連線（使用官方 CSV 備援）' : '已連線', recordCount: merged.records.length, retainedCount: merged.retainedCount,
+        message: [failureSummary(current.failures), merged.retainedCount ? `保留上次成功資料 ${merged.retainedCount} 筆` : '', fallbackCount ? `${fallbackCount} 份主要連結失敗，已使用同份官方 CSV` : '', current.failures.length ? '未取得的資料仍待確認，不能視為沒有違規' : ''].filter(Boolean).join('；'), failures: current.failures });
+    }
   }
-  const healthNews = await collectHealthBureauNews(now, since, previous.records || []);
+  const healthNews = await collectHealthBureauNews(now, since, previous.records || []).catch(error => {
+    const records = (previous.records || []).filter(item => item.sourceLayer === '食藥署國內衛生局新聞' && within(item.date, since, now));
+    return { records, source: { city: '全國', datasetUrl: 'https://www.fda.gov.tw/tc/csmNews.aspx', mode: '食藥署國內衛生局新聞自動收集', status: '本次更新失敗', recordCount: records.filter(item => item.matchable !== false).length, message: `${failureInfo(error).label}；保留上次成功資料，未取得資料仍待確認` } };
+  });
   records.push(...healthNews.records);
   sources.push(healthNews.source);
   const eastCoastSources = [

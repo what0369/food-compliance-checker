@@ -6,10 +6,13 @@ on:
   workflow_dispatch:
   workflow_run:
     workflows:
+      # 自動更新使用 GITHUB_TOKEN 推送，不會觸發上方的 push 發布。
+      - 每日更新公開資料
       - 核准人工新聞線索
       - 核准地方資料欄位修正
       - 核准每日新聞解析修正
     types: [completed]
+    branches: [main]
 
 permissions:
   contents: read

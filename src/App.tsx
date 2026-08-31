@@ -19,7 +19,7 @@ type NewsCorrectionSubmission = { products: string; brands: string; manufacturer
 type ReviewKind = "news" | "correction" | "newsCorrection";
 type GitHubReviewIssue = { number: number; title: string; body: string | null; html_url: string; created_at: string; user?: { login?: string }; pull_request?: unknown };
 type DatabaseTab = "official" | "local" | "manual" | "daily";
-type DatabaseData = { official: OfficialItem[]; local: OfficialItem[]; localRawCount: number; localRetryCount: number; localNoEvidenceCount: number; localSources: LocalSource[]; manual: ManualNewsItem[]; daily: NewsItem[]; officialUpdatedAt: string; localUpdatedAt: string; manualUpdatedAt: string; dailyUpdatedAt: string };
+type DatabaseData = { official: OfficialItem[]; local: OfficialItem[]; localPending: OfficialItem[]; localRawCount: number; localRetryCount: number; localNoEvidenceCount: number; localSources: LocalSource[]; manual: ManualNewsItem[]; daily: NewsItem[]; officialUpdatedAt: string; localUpdatedAt: string; manualUpdatedAt: string; dailyUpdatedAt: string };
 
 const LAW_URL = "https://www.fda.gov.tw/TC/newsContent.aspx?cid=3&id=30551";
 const ARTICLE_28_URL = "https://law.moj.gov.tw/LawClass/LawSingle.aspx?pcode=L0040001&flno=28";
@@ -677,7 +677,7 @@ export default function Home() {
       const daily = await dailyResponse.json() as { items: NewsItem[]; updatedAt: string };
       const localMatchable = local.records.filter((item) => item.matchable !== false);
       const localRetryCount = local.records.filter((item) => item.parseStatus === "failed").length;
-      setDatabaseData({ official: [...official.ads, ...official.imports], local: localMatchable, localRawCount: local.records.length, localRetryCount, localNoEvidenceCount: local.records.length - localMatchable.length - localRetryCount, localSources: local.sources, manual: manual.items, daily: daily.items, officialUpdatedAt: official.updatedAt, localUpdatedAt: local.updatedAt, manualUpdatedAt: manual.updatedAt, dailyUpdatedAt: daily.updatedAt });
+      setDatabaseData({ official: [...official.ads, ...official.imports], local: localMatchable, localPending: local.records.filter(item => item.parseStatus === 'failed'), localRawCount: local.records.length, localRetryCount, localNoEvidenceCount: local.records.length - localMatchable.length - localRetryCount, localSources: local.sources, manual: manual.items, daily: daily.items, officialUpdatedAt: official.updatedAt, localUpdatedAt: local.updatedAt, manualUpdatedAt: manual.updatedAt, dailyUpdatedAt: daily.updatedAt });
     } catch (cause) { setDatabaseError(cause instanceof Error ? cause.message : "資料庫讀取失敗。"); }
     finally { setDatabaseLoading(false); }
   }
@@ -985,10 +985,15 @@ export default function Home() {
 {databaseTab === "local" && <div className="local-count-panel">
 <div><span>原始收錄</span><strong>{databaseData.localRawCount.toLocaleString()}</strong><small>包含可查核及暫不納入的紀錄</small></div>
 <div><span>可查核</span><strong>{databaseData.local.length.toLocaleString()}</strong><small>會參與產品與業者自動比對</small></div>
-<div><span>待重試</span><strong>{databaseData.localRetryCount.toLocaleString()}</strong><small>公告正文或 PDF 暫時解析失敗</small></div>
+<div><span>待確認／重試</span><strong>{databaseData.localRetryCount.toLocaleString()}</strong><small>包括連線失敗、原頁失效或附件無法解析</small></div>
 <p>原始收錄 {databaseData.localRawCount.toLocaleString()}／可查核 {databaseData.local.length.toLocaleString()}／待重試 {databaseData.localRetryCount.toLocaleString()}。另有 {databaseData.localNoEvidenceCount.toLocaleString()} 筆已解析但未發現違規證據，因此不列入自動查核。</p>
 </div>}
-{databaseTab === "local" && <div className="local-source-status">{databaseData.localSources.map((source) => <a key={source.city} href={source.datasetUrl} target="_blank" rel="noreferrer"><b>{source.city}</b><span>{source.mode}</span><small className={source.status.startsWith("已") ? "ok" : ""}>{source.status}｜查核期間 {source.recordCount.toLocaleString()} 筆</small></a>)}</div>}
+{databaseTab === "local" && <div className="local-source-status">{databaseData.localSources.map((source) => <a key={source.city} href={source.datasetUrl} target="_blank" rel="noreferrer"><b>{source.city}</b><span>{source.mode}</span><small className={source.status.startsWith("已") ? "ok" : ""}>{source.status}｜查核期間 {source.recordCount.toLocaleString()} 筆</small>{source.message && <span>{source.message}</span>}</a>)}</div>}
+{databaseTab === "local" && databaseData.localPending.length > 0 && <details className="source-pending">
+<summary>查看 {databaseData.localPending.length} 筆待確認公告及失敗原因</summary>
+<p>未取得的正文或附件不參與違規判定，也不代表沒有違規。暫時連線失敗會重試；原頁失效須核對同公告新網址。</p>
+<ul>{databaseData.localPending.map((item, index) => <li key={`${item.url}-${index}`}><a href={item.url} target="_blank" rel="noreferrer">{item.city}｜{item.date}｜{item.media || item.product}</a><span>{item.reason}</span></li>)}</ul>
+</details>}
 {databaseTab === "local" && <div className="local-correction-note"><b>業者或製造商抓取錯誤？</b><span>請在該筆紀錄按「提出欄位修正」，填入正確內容。管理者核對官方來源後，在管理審核頁勾選核准即可重新發布；原始資料仍保留不覆寫。</span></div>}
 {(databaseTab === "daily" || databaseTab === "manual") && <div className="local-correction-note"><b>新聞解析內容抓錯？</b><span>請在該篇新聞按「回報新聞解析修正」，修正商品、品牌、相關業者或證據句。人工核准後會在每日更新後重新套用，原始解析結果仍保留。</span></div>}
 <div className="database-toolbar">

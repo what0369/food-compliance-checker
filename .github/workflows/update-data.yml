@@ -19,6 +19,8 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: 驗證來源失敗保護與備援
+        run: node --test scripts/source-reliability.test.mjs
       - run: node scripts/update-data.mjs
       - name: 保存更新資料
         run: |

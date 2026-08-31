@@ -226,6 +226,10 @@ footer { min-height:65px; padding:0 clamp(22px,5vw,72px); display:flex; align-it
 .local-source-status span { color:var(--muted); font-size:9px; }
 .local-source-status small { color:#a15c00; font-size:8px; }
 .local-source-status small.ok { color:var(--green); }
+.source-pending { margin:14px 0; padding:14px; border:1px solid var(--line); border-radius:12px; background:#faf7fd; font-size:12px; }
+.source-pending summary { cursor:pointer; font-weight:700; }
+.source-pending li { margin:10px 0; overflow-wrap:anywhere; }
+.source-pending li span { display:block; color:var(--muted); margin-top:4px; }
 .local-count-panel { margin:14px 0 0; padding:14px; display:grid; grid-template-columns:repeat(3,1fr); gap:8px; background:#f1ebf7; border:1px solid #ddd0e9; border-radius:12px; }
 .local-count-panel>div { padding:12px; display:grid; grid-template-columns:1fr auto; gap:4px 10px; background:#fff; border:1px solid var(--line); border-radius:9px; }
 .local-count-panel span { align-self:center; color:var(--ink); font-size:10px; font-weight:900; }

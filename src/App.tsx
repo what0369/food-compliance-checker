@@ -193,7 +193,8 @@ function buildNewsCorrectionIssue(item: NewsItem, correction: NewsCorrectionSubm
     "管理者核對新聞原文後，在本 Issue 留言「/套用新聞修正」即可核准；系統保留原始解析結果並於每日更新後重新套用修正。",
   ].join("\n");
   const titleName = clean(item.title).replace(/\s+-\s+[^-]+$/, "").slice(0, 55) || "每日新聞線索";
-  return { body, url: `${NEW_ISSUE_URL}?${new URLSearchParams({ title: `新聞解析修正：${titleName}`, body }).toString()}` };
+  const title = `新聞解析修正：${titleName}`;
+  return { title, body, url: `${NEW_ISSUE_URL}?${new URLSearchParams({ title, body }).toString()}` };
 }
 function strongProductMatch(left: string, right: string) {
   if (!left || !right) return false;
@@ -552,28 +553,33 @@ export default function Home() {
     try { parsed = new URL(data.url); if (!/^https?:$/.test(parsed.protocol)) throw new Error(); } catch { throw new Error("請輸入完整的 http 或 https 新聞網址。"); }
     return { url: parsed.toString(), note: data.note.slice(0, 1500) };
   }
+
+  function submitAnonymousReview(fields: Record<string, string>, targetPrefix: string) {
+    const target = `${targetPrefix}-${Date.now()}`;
+    const resultWindow = window.open("about:blank", target);
+    if (!resultWindow) throw new Error("瀏覽器阻擋送審結果頁，請允許此網站開啟彈出式視窗後重試。");
+    resultWindow.opener = null;
+    const form = document.createElement("form");
+    form.method = "post";
+    form.action = ANONYMOUS_NEWS_URL;
+    form.target = target;
+    form.style.display = "none";
+    for (const [name, value] of Object.entries({ ...fields, website: "" })) {
+      const input = document.createElement("input");
+      input.type = "hidden";
+      input.name = name;
+      input.value = value;
+      form.appendChild(input);
+    }
+    document.body.appendChild(form);
+    form.submit();
+    form.remove();
+  }
+
   function submitNewsForReview() {
     try {
       const data = validatedNewsSubmission();
-      const target = `anonymous-news-submit-${Date.now()}`;
-      const resultWindow = window.open("about:blank", target);
-      if (!resultWindow) throw new Error("瀏覽器阻擋送審結果頁，請允許此網站開啟彈出式視窗後重試。");
-      resultWindow.opener = null;
-      const form = document.createElement("form");
-      form.method = "post";
-      form.action = ANONYMOUS_NEWS_URL;
-      form.target = target;
-      form.style.display = "none";
-      for (const [name, value] of Object.entries({ url: data.url, note: data.note, website: "" })) {
-        const input = document.createElement("input");
-        input.type = "hidden";
-        input.name = name;
-        input.value = value;
-        form.appendChild(input);
-      }
-      document.body.appendChild(form);
-      form.submit();
-      form.remove();
+      submitAnonymousReview({ kind: "news", url: data.url, note: data.note }, "anonymous-news-submit");
       setNewsSubmitStatus("已送往匿名審核入口；新分頁會顯示送出結果。管理者核准前不會納入資料庫。");
       setError("");
     } catch (cause) { setError(cause instanceof Error ? cause.message : "目前無法使用匿名送審服務。"); }
@@ -649,18 +655,11 @@ export default function Home() {
   function submitNewsCorrectionForReview() {
     try {
       const issue = newsCorrectionIssue();
-      window.open(issue.url, "_blank", "noopener,noreferrer");
-      navigator.clipboard?.writeText(issue.body).then(
-        () => setNewsCorrectionSubmitStatus("已開啟 GitHub，送審內容也已複製。請確認內容後按 Submit new issue。"),
-        () => setNewsCorrectionSubmitStatus("已開啟 GitHub。請確認內容後按 Submit new issue。"),
-      );
+      if (!newsCorrectionItem) throw new Error("找不到要修改的新聞，請關閉後重試。");
+      submitAnonymousReview({ kind: "newsCorrection", url: newsCorrectionItem.articleUrl || newsCorrectionItem.url, title: issue.title, body: issue.body }, "anonymous-news-correction");
+      setNewsCorrectionSubmitStatus("已送往匿名審核入口；新分頁會顯示送出結果。管理者核准前不會修改資料庫。");
       setNewsCorrectionError("");
     } catch (cause) { setNewsCorrectionError(cause instanceof Error ? cause.message : "無法建立新聞解析修正案件。"); }
-  }
-
-  async function copyNewsCorrectionIssue() {
-    try { await navigator.clipboard.writeText(newsCorrectionIssue().body); setNewsCorrectionSubmitStatus("送審內容已複製；請開啟空白 Issue，貼上後送出。"); setNewsCorrectionError(""); }
-    catch (cause) { setNewsCorrectionError(cause instanceof Error ? cause.message : "瀏覽器無法複製內容，請手動複製表單文字。"); }
   }
 
   async function openDatabase() {
@@ -943,9 +942,9 @@ export default function Home() {
 <label>修改理由或原文位置<textarea value={newsCorrectionForm.reason} onChange={(event) => { setNewsCorrectionForm({ ...newsCorrectionForm, reason: event.target.value }); setNewsCorrectionError(""); }} placeholder="例如：原文第三段提到協億是產品製造商；目前系統誤抓到彰化縣衛生局。" /></label>
 </div>
 {newsCorrectionError && <p className="error modal-error">{newsCorrectionError}</p>}
-<button className="primary" onClick={submitNewsCorrectionForReview}>前往 GitHub 送出審核</button>
-{newsCorrectionSubmitStatus && <div className="github-fallback"><p>{newsCorrectionSubmitStatus}</p><div><button onClick={copyNewsCorrectionIssue}>複製送審內容</button><a href={NEW_ISSUE_URL} target="_blank" rel="noreferrer">開啟空白 Issue ↗</a></div></div>}
-<p className="github-note">提出者不需要管理者憑證。管理者核准後，人工修正會在每日新聞更新後重新套用，原始解析結果仍保留。</p>
+<button className="primary" onClick={submitNewsCorrectionForReview}>匿名送出解析修正（免登入）</button>
+{newsCorrectionSubmitStatus && <div className="github-fallback"><p>{newsCorrectionSubmitStatus}</p></div>}
+<p className="github-note">提出者不需要任何帳號。送出後只會建立待審核修正；管理者核准後才會更新資料庫，原始解析結果仍保留。</p>
 </section>
 </div>}
     {databaseOpen && <section className="database-page" role="dialog" aria-modal="true" aria-label="已收錄資料">
